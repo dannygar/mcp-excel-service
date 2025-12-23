@@ -1,0 +1,18 @@
+[project]
+name = "market-intel-mcp-server"
+version = "0.1.0"
+description = "Azure Functions MCP server for Market Intelligence APIs (Alpha Vantage, FRED, NewsAPI, etc.)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "azure-functions",
+    "requests",
+    "python-dotenv",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.17",
+]
