@@ -153,6 +153,10 @@ uv.lock
 # Environment files with secrets
 config/.env.*
 config/*.env
+mcp-server/.env
+
+# App registration credentials
+.azure/app-registration.json
 
 # Session tokens (but keep requirements.txt files)
 sessions/

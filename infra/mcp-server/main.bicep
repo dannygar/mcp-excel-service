@@ -9,13 +9,15 @@ param environmentName string
 @description('Primary location for all resources')
 param location string
 
-@description('Alpha Vantage API Key for company earnings data')
-@secure()
-param alphaVantageApiKey string = ''
+@description('Azure AD Tenant ID for authentication')
+param azureTenantId string = ''
 
-@description('JWT Secret for API authentication')
+@description('Azure AD Client ID (App Registration) for Microsoft Graph API')
+param azureClientId string = ''
+
+@description('Azure AD Client Secret for Microsoft Graph API')
 @secure()
-param jwtSecret string = ''
+param azureClientSecret string = ''
 
 // Optional parameters
 param containerAppName string = ''
@@ -94,8 +96,9 @@ module containerApp 'container-app.bicep' = {
     containerAppsEnvironmentId: containerAppsEnvironment.outputs.resourceId
     containerRegistryName: containerRegistry.outputs.name
     applicationInsightsConnectionString: applicationInsights.outputs.connectionString
-    alphaVantageApiKey: alphaVantageApiKey
-    jwtSecret: jwtSecret
+    azureTenantId: !empty(azureTenantId) ? azureTenantId : tenant().tenantId
+    azureClientId: azureClientId
+    azureClientSecret: azureClientSecret
   }
 }
 

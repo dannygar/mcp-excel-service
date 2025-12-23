@@ -35,7 +35,7 @@ $env:ALPHAVANTAGE_API_KEY = "your_api_key_here"
 azd up
 
 # Or use the deployment script for more control
-.\scripts\deploy-container-app.ps1
+.\scripts\deploy-mcp-server.ps1
 ```
 
 ### Step 3: Get Your MCP Endpoint
@@ -85,8 +85,8 @@ $acrName = azd env get-values | Select-String 'AZURE_CONTAINER_REGISTRY_NAME="([
   ForEach-Object { $_.Matches.Groups[1].Value }
 
 # Build and push using ACR
-az acr build --registry $acrName --image mcp-finance-server:latest `
-  --file container-app/Dockerfile container-app/
+az acr build --registry $acrName --image mcp-excel-server:latest `
+  --file mcp-server/Dockerfile mcp-server/
 ```
 
 ### 4. Verify Deployment
@@ -299,8 +299,8 @@ azd up
 
 ```pwsh
 # Build new image
-az acr build --registry <acr-name> --image mcp-finance-server:v2 `
-  --file container-app/Dockerfile container-app/
+az acr build --registry <acr-name> --image mcp-excel-server:v2 `
+  --file mcp-server/Dockerfile mcp-server/
 
 # Update container app
 az containerapp update --name <app> --resource-group <rg> `

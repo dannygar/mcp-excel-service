@@ -7,11 +7,15 @@ param containerRegistryName string
 @secure()
 param applicationInsightsConnectionString string = ''
 
-@secure()
-param alphaVantageApiKey string = ''
+@description('Azure AD Tenant ID for authentication')
+param azureTenantId string = ''
 
+@description('Azure AD Client ID (App Registration) for Microsoft Graph API')
+param azureClientId string = ''
+
+@description('Azure AD Client Secret for Microsoft Graph API')
 @secure()
-param jwtSecret string = ''
+param azureClientSecret string = ''
 
 // Reference existing container registry
 resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' existing = {
@@ -51,12 +55,16 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: containerRegistry.listCredentials().passwords[0].value
         }
         {
-          name: 'alphavantage-api-key'
-          value: alphaVantageApiKey
+          name: 'azure-tenant-id'
+          value: azureTenantId
         }
         {
-          name: 'jwt-secret'
-          value: !empty(jwtSecret) ? jwtSecret : 'default-dev-secret-change-in-production'
+          name: 'azure-client-id'
+          value: azureClientId
+        }
+        {
+          name: 'azure-client-secret'
+          value: azureClientSecret
         }
         {
           name: 'appinsights-connection-string'
@@ -68,19 +76,23 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       containers: [
         {
           name: 'mcp-server'
-          image: '${containerRegistry.properties.loginServer}/mcp-finance-server:latest'
+          image: '${containerRegistry.properties.loginServer}/mcp-excel-server:latest'
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
           }
           env: [
             {
-              name: 'ALPHAVANTAGE_API_KEY'
-              secretRef: 'alphavantage-api-key'
+              name: 'AZURE_TENANT_ID'
+              secretRef: 'azure-tenant-id'
             }
             {
-              name: 'JWT_SECRET'
-              secretRef: 'jwt-secret'
+              name: 'AZURE_CLIENT_ID'
+              secretRef: 'azure-client-id'
+            }
+            {
+              name: 'AZURE_CLIENT_SECRET'
+              secretRef: 'azure-client-secret'
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
@@ -89,10 +101,6 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'PORT'
               value: '3000'
-            }
-            {
-              name: 'NODE_ENV'
-              value: 'production'
             }
           ]
         }

@@ -6,11 +6,11 @@ metadata:
 
 infra:
   provider: bicep
-  path: infra/container-app
+  path: infra/mcp-server
 
 services:
   mcp-server:
-    project: container-app
+    project: mcp-server
     language: python
     host: containerapp
     docker:

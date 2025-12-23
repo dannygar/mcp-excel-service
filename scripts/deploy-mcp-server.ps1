@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-    Deploy MCP Finance Server to Azure Container Apps
+    Deploy MCP Excel Server to Azure Container Apps
 
 .DESCRIPTION
-    This script deploys the MCP Finance Server to Azure Container Apps with:
+    This script deploys the MCP Excel Server to Azure Container Apps with:
+    - App Registration in Entra ID (optional, if not already configured)
     - Infrastructure provisioning via Bicep
     - Docker image build and push to ACR
     - Container App configuration with secrets
@@ -15,8 +16,14 @@
 .PARAMETER Location
     The Azure region for deployment (default: "eastus2")
 
-.PARAMETER AlphaVantageApiKey
-    The Alpha Vantage API key. If not provided, reads from ALPHAVANTAGE_API_KEY env var
+.PARAMETER AzureClientId
+    The Azure AD Client ID. If not provided, reads from AZURE_CLIENT_ID env var or creates new app registration
+
+.PARAMETER AzureClientSecret
+    The Azure AD Client Secret. If not provided, reads from AZURE_CLIENT_SECRET env var
+
+.PARAMETER SkipAppRegistration
+    Skip app registration creation (use existing credentials)
 
 .PARAMETER SkipInfrastructure
     Skip infrastructure provisioning (use for code-only deployments)
@@ -25,19 +32,21 @@
     Skip endpoint testing after deployment
 
 .EXAMPLE
-    .\scripts\deploy-container-app.ps1
+    .\scripts\deploy-mcp-server.ps1
 
 .EXAMPLE
-    .\scripts\deploy-container-app.ps1 -EnvironmentName "prod" -Location "westus2"
+    .\scripts\deploy-mcp-server.ps1 -EnvironmentName "prod" -Location "westus2"
 
 .EXAMPLE
-    .\scripts\deploy-container-app.ps1 -SkipInfrastructure
+    .\scripts\deploy-mcp-server.ps1 -SkipAppRegistration -SkipInfrastructure
 #>
 
 param(
     [string]$EnvironmentName = "mcp-container",
     [string]$Location = "eastus2",
-    [string]$AlphaVantageApiKey = "",
+    [string]$AzureClientId = "",
+    [string]$AzureClientSecret = "",
+    [switch]$SkipAppRegistration,
     [switch]$SkipInfrastructure,
     [switch]$SkipTest
 )
@@ -48,13 +57,13 @@ $ErrorActionPreference = "Stop"
 function Write-Step { param($Message) Write-Host "`n▶ $Message" -ForegroundColor Cyan }
 function Write-Success { param($Message) Write-Host "✓ $Message" -ForegroundColor Green }
 function Write-Warning { param($Message) Write-Host "⚠ $Message" -ForegroundColor Yellow }
-function Write-Error { param($Message) Write-Host "✗ $Message" -ForegroundColor Red }
+function Write-ErrorMsg { param($Message) Write-Host "✗ $Message" -ForegroundColor Red }
 
 # Banner
 Write-Host @"
 
 ╔══════════════════════════════════════════════════════════════╗
-║        MCP Finance Server - Container Apps Deployment        ║
+║         MCP Excel Server - Container Apps Deployment         ║
 ╚══════════════════════════════════════════════════════════════╝
 
 "@ -ForegroundColor Magenta
@@ -104,38 +113,85 @@ if ($dockerAvailable) {
 }
 
 # =============================================================================
-# API Key Configuration
+# App Registration / Credentials Configuration
 # =============================================================================
 
-Write-Step "Configuring API keys..."
+Write-Step "Configuring Azure AD credentials..."
 
-# Get API key from parameter, environment, or config file
-if ([string]::IsNullOrEmpty($AlphaVantageApiKey)) {
-    $AlphaVantageApiKey = $env:ALPHAVANTAGE_API_KEY
+$azureTenantId = ""
+
+# Get tenant ID from current login
+$azAccount = az account show | ConvertFrom-Json
+$azureTenantId = $azAccount.tenantId
+
+# Get credentials from parameters, environment, or config file
+if ([string]::IsNullOrEmpty($AzureClientId)) {
+    $AzureClientId = $env:AZURE_CLIENT_ID
 }
 
-if ([string]::IsNullOrEmpty($AlphaVantageApiKey)) {
-    $envDevPath = Join-Path $ProjectRoot "config\.env.dev"
-    if (Test-Path $envDevPath) {
-        $envContent = Get-Content $envDevPath -Raw
-        if ($envContent -match 'ALPHAVANTAGE_API_KEY=(.+)') {
-            $AlphaVantageApiKey = $matches[1].Trim()
+if ([string]::IsNullOrEmpty($AzureClientSecret)) {
+    $AzureClientSecret = $env:AZURE_CLIENT_SECRET
+}
+
+# Try to load from config file
+if ([string]::IsNullOrEmpty($AzureClientId) -or [string]::IsNullOrEmpty($AzureClientSecret)) {
+    $envLocalPath = Join-Path $ProjectRoot "config\.env.local"
+    if (Test-Path $envLocalPath) {
+        $envContent = Get-Content $envLocalPath -Raw
+        if ([string]::IsNullOrEmpty($AzureClientId) -and $envContent -match 'AZURE_CLIENT_ID=(.+)') {
+            $AzureClientId = $matches[1].Trim()
+        }
+        if ([string]::IsNullOrEmpty($AzureClientSecret) -and $envContent -match 'AZURE_CLIENT_SECRET=(.+)') {
+            $AzureClientSecret = $matches[1].Trim()
+        }
+        if ($envContent -match 'AZURE_TENANT_ID=(.+)') {
+            $azureTenantId = $matches[1].Trim()
         }
     }
 }
 
-if ([string]::IsNullOrEmpty($AlphaVantageApiKey)) {
-    Write-Error "ALPHAVANTAGE_API_KEY not found. Please set it via:"
-    Write-Host "  - Parameter: -AlphaVantageApiKey 'your-key'"
-    Write-Host "  - Environment variable: `$env:ALPHAVANTAGE_API_KEY"
-    Write-Host "  - Config file: config\.env.dev"
-    exit 1
+# Check if we have credentials
+if ([string]::IsNullOrEmpty($AzureClientId) -or [string]::IsNullOrEmpty($AzureClientSecret)) {
+    if ($SkipAppRegistration) {
+        Write-ErrorMsg "Azure AD credentials not found and -SkipAppRegistration was specified."
+        Write-Host "Please provide credentials via:"
+        Write-Host "  - Parameters: -AzureClientId 'xxx' -AzureClientSecret 'xxx'"
+        Write-Host "  - Environment variables: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET"
+        Write-Host "  - Config file: config\.env.local"
+        exit 1
+    }
+    
+    Write-Warning "Azure AD credentials not found. Creating new App Registration..."
+    
+    # Run the app registration script
+    $registerScriptPath = Join-Path $ScriptPath "register-app.ps1"
+    if (Test-Path $registerScriptPath) {
+        $appResult = & $registerScriptPath
+        
+        if ($appResult) {
+            $AzureClientId = $appResult.clientId
+            $AzureClientSecret = $appResult.clientSecret
+            $azureTenantId = $appResult.tenantId
+            Write-Success "App Registration created successfully"
+        } else {
+            Write-ErrorMsg "Failed to create App Registration"
+            exit 1
+        }
+    } else {
+        Write-ErrorMsg "App registration script not found: $registerScriptPath"
+        exit 1
+    }
+} else {
+    Write-Success "Azure AD credentials configured"
 }
 
-Write-Success "Alpha Vantage API key configured"
+Write-Host "  Tenant ID: $azureTenantId"
+Write-Host "  Client ID: $AzureClientId"
 
-# Set as environment variable for azd
-$env:ALPHAVANTAGE_API_KEY = $AlphaVantageApiKey
+# Set as environment variables for azd
+$env:AZURE_TENANT_ID = $azureTenantId
+$env:AZURE_CLIENT_ID = $AzureClientId
+$env:AZURE_CLIENT_SECRET = $AzureClientSecret
 
 # =============================================================================
 # Infrastructure Deployment
@@ -155,7 +211,9 @@ if (-not $SkipInfrastructure) {
         
         # Set environment variables
         azd env set AZURE_LOCATION $Location
-        azd env set ALPHAVANTAGE_API_KEY $AlphaVantageApiKey
+        azd env set AZURE_TENANT_ID $azureTenantId
+        azd env set AZURE_CLIENT_ID $AzureClientId
+        azd env set AZURE_CLIENT_SECRET $AzureClientSecret
         
         # Deploy infrastructure and code
         Write-Host "Running 'azd up' - this may take 5-10 minutes..."
@@ -220,19 +278,11 @@ Write-Step "Verifying Container App configuration..."
 
 $envVars = az containerapp show --name $containerAppName --resource-group $resourceGroup --query "properties.template.containers[0].env" -o json | ConvertFrom-Json
 
-$hasApiKey = $envVars | Where-Object { $_.name -eq "ALPHAVANTAGE_API_KEY" }
-if ($hasApiKey) {
-    Write-Success "ALPHAVANTAGE_API_KEY environment variable configured"
+$hasClientId = $envVars | Where-Object { $_.name -eq "AZURE_CLIENT_ID" }
+if ($hasClientId) {
+    Write-Success "AZURE_CLIENT_ID environment variable configured"
 } else {
-    Write-Warning "ALPHAVANTAGE_API_KEY not found in container env vars"
-    Write-Host "  Adding environment variable..."
-    
-    az containerapp update `
-        --name $containerAppName `
-        --resource-group $resourceGroup `
-        --set-env-vars "ALPHAVANTAGE_API_KEY=secretref:alphavantage-api-key" "PORT=3000"
-    
-    Write-Success "Environment variable added"
+    Write-Warning "AZURE_CLIENT_ID not found in container env vars"
 }
 
 # =============================================================================
@@ -302,25 +352,24 @@ Write-Host "  Health Endpoint:  https://$fqdn/health" -ForegroundColor Cyan
 Write-Host "  Transport:        HTTP (Streamable HTTP)" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Available Tools:" -ForegroundColor White
-Write-Host "  • get_company_revenue        - Get quarterly revenue data"
-Write-Host "  • get_company_free_cash_flow - Get quarterly free cash flow data"
+Write-Host "  • excel.appendRows  - Append rows to an Excel table"
+Write-Host "  • excel.updateRange - Update a range of cells in a worksheet"
 Write-Host ""
-Write-Host "Supported Companies:" -ForegroundColor White
-Write-Host "  • MSFT (Microsoft)"
-Write-Host "  • TSLA (Tesla)"
-Write-Host "  • NVDA (NVIDIA)"
+Write-Host "Authentication:" -ForegroundColor White
+Write-Host "  • Tenant ID:  $azureTenantId"
+Write-Host "  • Client ID:  $AzureClientId"
 Write-Host ""
 Write-Host "Next Steps:" -ForegroundColor Yellow
 Write-Host "  1. Add MCP server to Azure AI Foundry:"
 Write-Host "     - URL: $mcpEndpoint"
 Write-Host "     - Transport: Streamable HTTP"
-Write-Host "     - Authentication: None (public endpoint)"
+Write-Host "     - Authentication: None (uses service principal internally)"
 Write-Host ""
 Write-Host "  2. Add to VS Code GitHub Copilot (mcp.json):"
 Write-Host @"
      {
        "servers": {
-         "mcp-finance": {
+         "mcp-excel": {
            "type": "http",
            "url": "$mcpEndpoint"
          }
@@ -329,7 +378,7 @@ Write-Host @"
 "@ -ForegroundColor Gray
 Write-Host ""
 Write-Host "  3. Test in Foundry Chat Playground:"
-Write-Host '     "What was Microsoft revenue for Q4 FY2024?"'
+Write-Host '     "Append sales data to the SalesTable in my Excel file"'
 Write-Host ""
 
 # Save deployment info to file

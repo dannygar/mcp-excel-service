@@ -8,11 +8,14 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
-    "alphaVantageApiKey": {
-      "value": "${ALPHAVANTAGE_API_KEY}"
+    "azureTenantId": {
+      "value": "${AZURE_TENANT_ID}"
     },
-    "jwtSecret": {
-      "value": "${JWT_SECRET}"
+    "azureClientId": {
+      "value": "${AZURE_CLIENT_ID}"
+    },
+    "azureClientSecret": {
+      "value": "${AZURE_CLIENT_SECRET}"
     }
   }
 }
