@@ -984,6 +984,47 @@ async def excel_log_trades(
                 "message": "No trades provided to log",
             }, indent=2)
         
+        # Sort trades by open_date (ascending) then by open_time (ascending)
+        def parse_trade_datetime(trade: dict) -> tuple:
+            """
+            Parse trade's open_date and open_time for sorting.
+            Returns a tuple (date_key, time_key) for proper chronological ordering.
+            """
+            open_date_str = trade.get("open_date", trade.get("date", ""))
+            open_time_str = trade.get("open_time", trade.get("time", ""))
+            
+            # Parse date - default to max date if invalid
+            date_key = datetime.max
+            if open_date_str:
+                parsed_date = parse_date_string(open_date_str)
+                if parsed_date:
+                    date_key = parsed_date
+            
+            # Parse time - default to max time if invalid
+            time_key = datetime.max.time()
+            if open_time_str:
+                # Try common time formats
+                time_formats = [
+                    "%I:%M %p",      # 10:30 AM
+                    "%I:%M%p",       # 10:30AM
+                    "%H:%M",         # 14:30
+                    "%H:%M:%S",      # 14:30:00
+                    "%I:%M:%S %p",   # 10:30:00 AM
+                ]
+                for fmt in time_formats:
+                    try:
+                        parsed_time = datetime.strptime(open_time_str.strip().upper(), fmt)
+                        time_key = parsed_time.time()
+                        break
+                    except ValueError:
+                        continue
+            
+            return (date_key, time_key)
+        
+        # Sort trades chronologically (earliest first)
+        trades_list.sort(key=parse_trade_datetime)
+        logger.info(f"Sorted {len(trades_list)} trades by open_date and open_time (ascending)")
+        
         # If reference_date not provided, find the last non-empty date in column C
         if not reference_date:
             logger.info(f"No reference_date provided, finding last date in column C of sheet '{sheet_name}'")
