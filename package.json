@@ -6,7 +6,7 @@
     "inspector": "pwsh -File run-inspector.ps1"
   },
   "devDependencies": {
-    "@modelcontextprotocol/inspector": "^0.1.0"
+    "@modelcontextprotocol/inspector": "^0.7.0"
   },
   "keywords": [
     "mcp",

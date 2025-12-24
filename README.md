@@ -1,22 +1,24 @@
-# MCP Finance Data Server
+# MCP Excel Service
 
-Azure Container Apps-based MCP (Model Context Protocol) server providing company earnings data for AI agents.
+Azure Container Apps-based MCP (Model Context Protocol) server providing Excel file manipulation capabilities for AI agents via Microsoft Graph API.
 
 ## Architecture
 
 - **Remote MCP server** using Azure Container Apps (FastMCP + Python 3.12)
-- **HTTP Transport** (Streamable HTTP) for Azure AI Foundry integration
-- **2 company earnings tools** for revenue and free cash flow analysis
-- **Data provider**: Alpha Vantage API (SEC filings)
-- **Supported companies**: Microsoft (MSFT), Tesla (TSLA), NVIDIA (NVDA)
+- **Streamable HTTP Transport** for Azure AI Foundry integration
+- **2 Excel manipulation tools** for updating cells and finding/updating rows
+- **Data provider**: Microsoft Graph API (SharePoint/OneDrive)
+- **Authentication**: Azure AD service principal (client credentials flow)
+- **Auto-scaling**: 1-5 replicas based on HTTP load
 - **Deployed via Azure Developer CLI** (`azd`)
 
 ## Prerequisites
 
 - **Python 3.11+** (3.12 recommended)
 - **Docker** (for local development and container builds)
-- **Azure Developer CLI** (azd) for deployment
-- **Azure CLI** for resource management
+- **Azure Developer CLI** (`azd`) for deployment
+- **Azure CLI** (`az`) for resource management
+- **Microsoft 365** with SharePoint/OneDrive access
 
 **Setup:**
 ```pwsh
@@ -24,6 +26,7 @@ Azure Container Apps-based MCP (Model Context Protocol) server providing company
 irm https://astral.sh/uv/install.ps1 | iex
 
 # Sync dependencies
+cd mcp-server
 uv sync
 ```
 
@@ -37,8 +40,8 @@ uv sync
 # Build the container
 docker build -t mcp-excel-server -f mcp-server/Dockerfile mcp-server/
 
-# Run with your API key
-docker run -p 3000:3000 -e ALPHAVANTAGE_API_KEY="your_key" mcp-finance-server
+# Run with Azure AD credentials
+docker run -p 3000:3000 --env-file mcp-server/.env mcp-excel-server
 
 # Server available at http://localhost:3000/mcp
 ```
@@ -48,8 +51,11 @@ docker run -p 3000:3000 -e ALPHAVANTAGE_API_KEY="your_key" mcp-finance-server
 ```pwsh
 cd mcp-server
 
-# Set your access token
-$env:GRAPH_ACCESS_TOKEN = "your_token"
+# Ensure .env file exists with Azure AD credentials (created by register-app.ps1)
+# Or set environment variables manually:
+$env:AZURE_TENANT_ID = "your-tenant-id"
+$env:AZURE_CLIENT_ID = "your-client-id"
+$env:AZURE_CLIENT_SECRET = "your-client-secret"
 
 # Run the server
 uv run python server.py
@@ -63,12 +69,12 @@ uv run python server.py
 # Install MCP Inspector
 yarn install
 
-# Start the server first, then launch inspector
+# Start the server first (in another terminal), then launch inspector
 yarn inspector
 ```
 
 The inspector opens at `http://localhost:5173` where you can:
-- Browse available tools (`get_company_revenue`, `get_company_free_cash_flow`)
+- Browse available tools (`excel.updateRowByLookup`, `excel.updateRange`)
 - Test tool invocations with custom parameters
 - View request/response payloads in real-time
 
@@ -76,26 +82,45 @@ The inspector opens at `http://localhost:5173` where you can:
 
 ## Deploy to Azure
 
-### 1. Configure API Keys
+### 1. Register App & Configure Credentials
 
 ```pwsh
-# Required: Set your Alpha Vantage API key
-$env:ALPHAVANTAGE_API_KEY = "your_alpha_vantage_key"
+# Create Entra ID App Registration with Graph API permissions
+.\scripts\register-app.ps1
+
+# This creates:
+# - App Registration with Files.ReadWrite.All and Sites.ReadWrite.All permissions
+# - Client secret for authentication
+# - .env file with credentials for local development
+# - Foundry-compatible authentication (Application ID URI)
 ```
 
-**Get a free API key:** https://www.alphavantage.co/support/#api-key
+> ⚠️ **Important**: After running the script, grant admin consent for the API permissions in the Azure Portal.
 
-### 2. Deploy with Azure Developer CLI
+### 2. Deploy with Deployment Script (Recommended)
 
 ```pwsh
-# Deploy infrastructure + container
-azd up
-
-# Or use the deployment script for more control
+# Full deployment with Foundry integration
 .\scripts\deploy-mcp-server.ps1
+
+# This script will:
+# - Create/update App Registration (if needed)
+# - Auto-discover Azure AI Foundry projects
+# - Let you select which projects should access the MCP server
+# - Deploy infrastructure via Bicep
+# - Build and push Docker image to ACR
+# - Configure Container App with secrets
+# - Display Foundry integration instructions
 ```
 
-### 3. Verify Deployment
+### 3. Deploy with Azure Developer CLI
+
+```pwsh
+# Alternative: Deploy infrastructure + container directly
+azd up
+```
+
+### 4. Verify Deployment
 
 ```pwsh
 # Check health endpoint
@@ -105,7 +130,7 @@ Invoke-WebRequest -Uri "https://<your-container-app>.azurecontainerapps.io/healt
 # https://<your-container-app>.azurecontainerapps.io/mcp
 ```
 
-### 4. Teardown
+### 5. Teardown
 
 ```pwsh
 # Remove all Azure resources
@@ -118,22 +143,32 @@ azd down
 
 ### Add MCP Server to Foundry Agent
 
-1. Navigate to your AI Foundry project: https://ai.azure.com
-2. Go to **Agent** → **Tools** → **MCP Servers**
-3. Click **Add MCP Server**
-4. Configure:
-   - **Name**: `mcp-finance`
-   - **Transport Type**: Streamable HTTP
-   - **Endpoint URL**: `https://<your-container-app>.azurecontainerapps.io/mcp`
-   - **Authentication**: None
-5. Click **Save**
+> **📖 For detailed instructions, see [FOUNDRY_INTEGRATION.md](docs/FOUNDRY_INTEGRATION.md)**
+
+**Quick Setup:**
+
+1. Navigate to [Azure AI Foundry](https://ai.azure.com)
+2. Go to your project → **Build** → **Create agent**
+3. Click **+ Add** in the Tools section
+4. Select **Custom** → **Model Context Protocol** → **Create**
+5. Configure the connection:
+
+| Field | Value |
+|-------|-------|
+| **Name** | `MCP Excel Service` |
+| **Remote MCP Server** | `https://<your-container-app>.azurecontainerapps.io/mcp` |
+| **Authentication** | Microsoft Entra |
+| **Type** | Project Managed Identity |
+| **Audience** | `<your-client-id>` (from deployment output) |
+
+6. Click **Connect**
 
 ### Test in Chat Playground
 
 Try these prompts:
-- "What was Microsoft's revenue for Q4 FY2024?"
-- "Get Tesla's free cash flow for Q2 FY2024"
-- "Compare NVIDIA's revenue across Q1-Q4 FY2024"
+- "Append sales data to my Excel file in SharePoint"
+- "Update cells A1:B5 in my inventory spreadsheet"
+- "Add a new row to the Products table in my workbook"
 
 ---
 
@@ -144,11 +179,11 @@ Add to your `.vscode/mcp.json`:
 ```json
 {
   "servers": {
-    "mcp-finance-remote": {
+    "mcp-excel-remote": {
       "type": "http",
       "url": "https://<your-container-app>.azurecontainerapps.io/mcp"
     },
-    "mcp-finance-local": {
+    "mcp-excel-local": {
       "type": "http",
       "url": "http://localhost:3000/mcp"
     }
@@ -160,67 +195,166 @@ Add to your `.vscode/mcp.json`:
 
 ## MCP Tools
 
-### `get_company_revenue`
+Both tools accept a single JSON object as input, making them fully compatible with Foundry Agent schema validation.
 
-Get total revenue in USD millions for a company's quarterly earnings report.
+### `excel.updateRowByLookup`
+
+Find a row by looking up a reference value in a column and update specific cells in that row (or a relative row).
 
 **Parameters:**
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `company_symbol` | string | Company ticker (MSFT, TSLA, or NVDA) |
-| `fiscal_year` | number | Fiscal year (e.g., 2024) |
-| `fiscal_quarter` | number | Fiscal quarter (1, 2, 3, or 4) |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | ✓ | SharePoint/OneDrive URL to document library |
+| `file_name` | string | ✓ | Excel file name with .xlsx extension |
+| `sheet_name` | string | ✓ | Worksheet name |
+| `search_column` | string | ✓ | Column letter to search (e.g., "A", "C") |
+| `reference_value` | string | ✓ | Value to find (supports dates like "12/22/2025") |
+| `target_columns` | string | ✓ | **JSON array** of column letters (e.g., `'["D", "F", "H"]'`) |
+| `values` | string | ✓ | **JSON array** of values to write (e.g., `'["value1", 123, true]'`) |
+| `row_offset` | integer | | Rows below found row to update (default: 0) |
 
-**Example Response:**
+> **Note**: `target_columns` and `values` must be valid JSON strings. This ensures compatibility with all MCP clients including Azure AI Foundry.
+
+**Example Request:**
 ```json
 {
-  "company": "MSFT",
-  "fiscal_year": 2024,
-  "fiscal_quarter": 4,
-  "fiscal_date_ending": "2024-06-30",
-  "total_revenue_usd_millions": 64725.00,
-  "currency": "USD",
-  "data_source": "Alpha Vantage"
+  "url": "https://contoso.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx",
+  "file_name": "2025 Trade Tracker.xlsx",
+  "sheet_name": "December",
+  "search_column": "C",
+  "reference_value": "12/23/2025",
+  "target_columns": "[\"C\", \"E\", \"I\", \"J\", \"L\"]",
+  "values": "[\"12/23/2025\", \"11:36 AM\", \"VPCS\", 0.25, 25]",
+  "row_offset": 1
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Successfully updated 5 cells in row 15",
+  "sheet_name": "December",
+  "found_row": 14,
+  "target_row": 15,
+  "row_offset": 1,
+  "updated_cells": ["C15", "E15", "I15", "J15", "L15"]
 }
 ```
 
 ---
 
-### `get_company_free_cash_flow`
+### `excel.updateRange`
 
-Get free cash flow in USD millions for a company's quarterly earnings report.
+Update a range of cells in an Excel worksheet with a 2D array of values.
 
 **Parameters:**
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `company_symbol` | string | Company ticker (MSFT, TSLA, or NVDA) |
-| `fiscal_year` | number | Fiscal year (e.g., 2024) |
-| `fiscal_quarter` | number | Fiscal quarter (1, 2, 3, or 4) |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | ✓ | SharePoint/OneDrive URL to document library |
+| `file_name` | string | ✓ | Excel file name with .xlsx extension |
+| `sheet_name` | string | ✓ | Worksheet name |
+| `address` | string | ✓ | Cell range address (e.g., "A1:C3") |
+| `values` | string | ✓ | **JSON 2D array** where each inner array is a row |
 
-**Example Response:**
+> **Note**: `values` must be a valid JSON string containing a 2D array.
+
+**Example Request:**
 ```json
 {
-  "company": "MSFT",
-  "fiscal_year": 2024,
-  "fiscal_quarter": 4,
-  "fiscal_date_ending": "2024-06-30",
-  "free_cash_flow_usd_millions": 23255.00,
-  "operating_cash_flow_usd_millions": 28515.00,
-  "capital_expenditures_usd_millions": 5260.00,
-  "currency": "USD",
-  "data_source": "Alpha Vantage"
+  "url": "https://contoso.sharepoint.com/sites/Sales/Shared%20Documents",
+  "file_name": "Sales.xlsx",
+  "sheet_name": "Sheet1",
+  "address": "A1:C2",
+  "values": "[[\"Name\", \"Quantity\", \"Price\"], [\"Widget\", 100, 9.99]]"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Successfully updated range 'A1:C2' in sheet 'Sheet1'",
+  "file_name": "Sales.xlsx",
+  "sheet_name": "Sheet1",
+  "address": "A1:C2",
+  "row_count": 2,
+  "column_count": 3
 }
 ```
 
 ---
 
-## Supported Companies
+### `excel.logTrades`
 
-| Symbol | Company Name |
-|--------|--------------|
-| MSFT | Microsoft Corporation |
-| TSLA | Tesla, Inc. |
-| NVDA | NVIDIA Corporation |
+**High-level tool** for logging multiple trades to a pre-configured trade tracker spreadsheet. The spreadsheet URL and file name are configured via environment variables, simplifying agent prompts.
+
+**Environment Variables (required):**
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TRADE_TRACKER_URL` | SharePoint/OneDrive URL | `https://contoso.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx` |
+| `TRADE_TRACKER_FILE` | Excel workbook filename | `2025 Trade Tracker.xlsx` |
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `trades` | string | ✓ | **JSON array** of trade objects (see below) |
+| `reference_date` | string | ✓ | Date to search for in column C (trades append below) |
+| `sheet_name` | string | | Worksheet name (default: "December") |
+
+**Trade Object Fields:**
+```json
+{
+  "date": "12/23/2025",      // → Column C
+  "time": "10:30 AM",        // → Column E
+  "strategy": "VPCS",        // → Column I
+  "credit": 0.25,            // → Column J
+  "contracts": 25            // → Column L
+}
+```
+
+**Example Request:**
+```json
+{
+  "trades": "[{\"date\": \"12/23/2025\", \"time\": \"10:30 AM\", \"strategy\": \"VPCS\", \"credit\": 0.25, \"contracts\": 25}, {\"date\": \"12/23/2025\", \"time\": \"2:15 PM\", \"strategy\": \"IC\", \"credit\": 0.50, \"contracts\": 10}]",
+  "reference_date": "12/22/2025",
+  "sheet_name": "December"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Successfully logged 2 trades",
+  "trades_logged": 2,
+  "file_name": "2025 GY Capital Group LLC Trade Tracker.xlsx",
+  "sheet_name": "December",
+  "reference_date": "12/22/2025",
+  "results": [
+    {"trade_index": 1, "row": 15, "values": ["12/23/2025", "10:30 AM", "VPCS", 0.25, 25]},
+    {"trade_index": 2, "row": 16, "values": ["12/23/2025", "2:15 PM", "IC", 0.50, 10]}
+  ]
+}
+```
+
+**Simplified Foundry Agent Prompt:**
+```
+Show me all SPX trades from today (12/23/25, 9:30am-4:00pm EST), 
+then log them to my trade tracker using 12/22/2025 as the reference date.
+```
+
+---
+
+## Supported SharePoint URL Formats
+
+The MCP server automatically resolves various SharePoint/OneDrive URL formats:
+
+| URL Type | Example |
+|----------|---------|
+| SharePoint Site | `https://contoso.sharepoint.com/sites/Sales/Shared%20Documents` |
+| Document Library View | `https://contoso.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx` |
+| OneDrive for Business | `https://contoso-my.sharepoint.com/personal/user/Documents` |
 
 ---
 
@@ -234,14 +368,13 @@ Get free cash flow in USD millions for a company's quarterly earnings report.
 │   └── pyproject.toml         # Project metadata
 ├── infra/
 │   └── mcp-server/
-│       ├── main.bicep         # Azure infrastructure
-│       └── container-app.bicep # Container App definition
-├── config/
-│   ├── .env.prod              # Production API keys
-│   └── .env.dev               # Development API keys
+│       ├── main.bicep         # Azure infrastructure (ACR, Log Analytics, etc.)
+│       └── container-app.bicep # Container App definition (scaling 1-5 replicas)
 ├── scripts/
-│   └── deploy-mcp-server.ps1  # Deployment script
+│   ├── deploy-mcp-server.ps1  # Full deployment with Foundry integration
+│   └── register-app.ps1       # Entra ID App Registration
 ├── docs/
+│   ├── FOUNDRY_INTEGRATION.md # Step-by-step Foundry setup guide
 │   └── AZURE_DEPLOYMENT.md    # Detailed Azure setup guide
 ├── azure.yaml                 # azd configuration
 ├── package.json               # MCP Inspector dependencies
@@ -257,17 +390,66 @@ Get free cash flow in USD millions for a company's quarterly earnings report.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ALPHAVANTAGE_API_KEY` | Yes | Alpha Vantage API key for financial data |
+| `AZURE_TENANT_ID` | Yes | Azure AD tenant ID |
+| `AZURE_CLIENT_ID` | Yes | App Registration client ID |
+| `AZURE_CLIENT_SECRET` | Yes | App Registration client secret |
 | `PORT` | No | Server port (default: 3000) |
 | `HOST` | No | Server host (default: 0.0.0.0) |
 
-### API Rate Limits
+### Required Graph API Permissions
 
-Alpha Vantage free tier:
-- 25 requests per day
-- 5 requests per minute
+| Permission | Type | Description |
+|------------|------|-------------|
+| `Files.ReadWrite.All` | Application | Read/write files in SharePoint/OneDrive |
+| `Sites.ReadWrite.All` | Application | Read/write items in all site collections |
 
-Consider upgrading for production use.
+> ⚠️ These permissions require **admin consent** after App Registration is created.
+
+### Scaling Configuration
+
+The Container App is configured for auto-scaling:
+- **Minimum replicas**: 1 (always running)
+- **Maximum replicas**: 5
+- **Scale trigger**: 50 concurrent HTTP requests
+
+---
+
+## Testing
+
+### Run Test Suite
+
+The test suite validates schema compatibility and tool functionality:
+
+```pwsh
+# Start the MCP server first
+cd mcp-server
+uv run python server.py
+
+# In another terminal, run all tests
+cd mcp-server
+uv run python test_server.py
+
+# Run specific tests
+uv run python test_server.py --test health
+uv run python test_server.py --test list_tools
+uv run python test_server.py --test update_row
+uv run python test_server.py --test update_range
+```
+
+### Integration Test (with real SharePoint)
+
+```pwsh
+uv run python test_server.py --test integration `
+  --sharepoint-url "https://contoso.sharepoint.com/Shared%20Documents" `
+  --file-name "MyWorkbook.xlsx" `
+  --sheet-name "Sheet1"
+```
+
+### Test Against Deployed Server
+
+```pwsh
+uv run python test_server.py --url "https://<your-container-app>.azurecontainerapps.io"
+```
 
 ---
 
@@ -292,14 +474,24 @@ azd monitor --logs
 2. Set breakpoints in `server.py`
 3. Attach debugger (VS Code: Python: Attach to Local Process)
 
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| 401 Unauthorized | Check Graph API permissions have admin consent |
+| Token acquisition failed | Verify AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET |
+| File not found | Verify SharePoint URL format and file name |
+| Health check fails | Ensure Container App is running and PORT is 3000 |
+
 ---
 
 ## Documentation
 
+- [Foundry Integration Guide](docs/FOUNDRY_INTEGRATION.md)
 - [Azure Deployment Guide](docs/AZURE_DEPLOYMENT.md)
 - [Model Context Protocol Documentation](https://modelcontextprotocol.io/)
 - [FastMCP Documentation](https://gofastmcp.com/)
-- [Alpha Vantage API](https://www.alphavantage.co/documentation/)
+- [Microsoft Graph API - Excel](https://learn.microsoft.com/graph/api/resources/excel)
 
 ---
 

@@ -19,6 +19,12 @@ param azureClientId string = ''
 @secure()
 param azureClientSecret string = ''
 
+@description('SharePoint/OneDrive URL for the trade tracker document library')
+param tradeTrackerUrl string = ''
+
+@description('Excel file name for the trade tracker workbook')
+param tradeTrackerFile string = ''
+
 // Optional parameters
 param containerAppName string = ''
 param containerRegistryName string = ''
@@ -99,6 +105,8 @@ module containerApp 'container-app.bicep' = {
     azureTenantId: !empty(azureTenantId) ? azureTenantId : tenant().tenantId
     azureClientId: azureClientId
     azureClientSecret: azureClientSecret
+    tradeTrackerUrl: tradeTrackerUrl
+    tradeTrackerFile: tradeTrackerFile
   }
 }
 

@@ -17,6 +17,12 @@ param azureClientId string = ''
 @secure()
 param azureClientSecret string = ''
 
+@description('SharePoint/OneDrive URL for the trade tracker document library')
+param tradeTrackerUrl string = ''
+
+@description('Excel file name for the trade tracker workbook')
+param tradeTrackerFile string = ''
+
 // Reference existing container registry
 resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' existing = {
   name: containerRegistryName
@@ -99,6 +105,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               secretRef: 'appinsights-connection-string'
             }
             {
+              name: 'TRADE_TRACKER_URL'
+              value: tradeTrackerUrl
+            }
+            {
+              name: 'TRADE_TRACKER_FILE'
+              value: tradeTrackerFile
+            }
+            {
               name: 'PORT'
               value: '3000'
             }
@@ -106,14 +120,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         }
       ]
       scale: {
-        minReplicas: 0
-        maxReplicas: 10
+        minReplicas: 1
+        maxReplicas: 5
         rules: [
           {
             name: 'http-rule'
             http: {
               metadata: {
-                concurrentRequests: '100'
+                concurrentRequests: '50'
               }
             }
           }

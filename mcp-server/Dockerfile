@@ -24,6 +24,7 @@ COPY --from=builder /app/.venv /app/.venv
 
 # Copy application code
 COPY server.py ./
+COPY config.py ./
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"

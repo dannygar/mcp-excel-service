@@ -16,6 +16,12 @@
     },
     "azureClientSecret": {
       "value": "${AZURE_CLIENT_SECRET}"
+    },
+    "tradeTrackerUrl": {
+      "value": "${TRADE_TRACKER_URL}"
+    },
+    "tradeTrackerFile": {
+      "value": "${TRADE_TRACKER_FILE}"
     }
   }
 }

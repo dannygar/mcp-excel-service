@@ -6,6 +6,7 @@
     This script creates or updates an App Registration in Microsoft Entra ID with:
     - Microsoft Graph API permissions for Excel file operations
     - Client secret for service principal authentication
+    - Foundry-compatible authentication (Application ID URI for managed identity)
     - Outputs credentials for local development and Azure deployment
 
 .PARAMETER AppName
@@ -20,11 +21,17 @@
 .PARAMETER OutputEnvFile
     Path to output the .env file with credentials (default: config/.env.local)
 
+.PARAMETER EnableFoundryAuth
+    Enable Foundry Project Managed Identity authentication by configuring Application ID URI
+
 .EXAMPLE
     .\scripts\register-app.ps1
 
 .EXAMPLE
     .\scripts\register-app.ps1 -AppName "MCP Excel Service Prod" -SecretExpirationDays 180
+
+.EXAMPLE
+    .\scripts\register-app.ps1 -EnableFoundryAuth
 
 .NOTES
     Required permissions: Application.ReadWrite.All or Application Administrator role
@@ -34,7 +41,8 @@ param(
     [string]$AppName = "MCP Excel Service",
     [switch]$CreateSecret = $true,
     [int]$SecretExpirationDays = 365,
-    [string]$OutputEnvFile = ""
+    [string]$OutputEnvFile = "",
+    [switch]$EnableFoundryAuth = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -179,6 +187,90 @@ if (-not $existingSp) {
 }
 
 # =============================================================================
+# Configure Foundry Authentication (Application ID URI)
+# =============================================================================
+
+$identifierUri = ""
+
+if ($EnableFoundryAuth) {
+    Write-Step "Configuring Foundry Authentication..."
+    
+    # Set Application ID URI for Foundry Project Managed Identity authentication
+    # This is required for Foundry agents to authenticate using their managed identity
+    $identifierUri = "api://$appId"
+    
+    try {
+        # Update app with identifier URI
+        az ad app update `
+            --id $appId `
+            --identifier-uris $identifierUri
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Application ID URI configured: $identifierUri"
+            Write-Host "  This URI is used as the 'Audience' when configuring Foundry MCP connection"
+        } else {
+            Write-Warning "Could not set Application ID URI. You may need to configure this manually."
+        }
+        
+        # Configure the app to accept tokens from Azure AD
+        # This enables the Foundry managed identity to acquire tokens for this app
+        Write-Host "Enabling app for access token issuance..."
+        
+        # Get current app manifest to update oauth2Permissions
+        $appManifest = az ad app show --id $appId -o json | ConvertFrom-Json
+        
+        # Check if we need to add a default scope for the API
+        $hasDefaultScope = $appManifest.api.oauth2PermissionScopes | Where-Object { $_.value -eq "user_impersonation" }
+        
+        if (-not $hasDefaultScope) {
+            # Create a default scope for the API
+            $defaultScope = @{
+                adminConsentDescription = "Allow the application to access MCP Excel Service on behalf of the signed-in user."
+                adminConsentDisplayName = "Access MCP Excel Service"
+                id = [guid]::NewGuid().ToString()
+                isEnabled = $true
+                type = "User"
+                userConsentDescription = "Allow the application to access MCP Excel Service on your behalf."
+                userConsentDisplayName = "Access MCP Excel Service"
+                value = "user_impersonation"
+            }
+            
+            $apiConfig = @{
+                oauth2PermissionScopes = @($defaultScope)
+            }
+            
+            $apiJsonFile = [System.IO.Path]::GetTempFileName()
+            $apiConfig | ConvertTo-Json -Depth 10 | Out-File -FilePath $apiJsonFile -Encoding UTF8
+            
+            try {
+                az ad app update --id $appId --set api="@$apiJsonFile" 2>$null
+                Write-Success "Default API scope configured"
+            }
+            catch {
+                Write-Warning "Could not configure API scope. Foundry may still work with managed identity."
+            }
+            finally {
+                if (Test-Path $apiJsonFile) {
+                    Remove-Item $apiJsonFile -Force
+                }
+            }
+        }
+        
+        Write-Success "Foundry authentication configured"
+        Write-Host ""
+        Write-Host "  IMPORTANT: When adding this MCP server to a Foundry agent:" -ForegroundColor Yellow
+        Write-Host "    - Authentication: Microsoft Entra" -ForegroundColor White
+        Write-Host "    - Type:           Project Managed Identity" -ForegroundColor White
+        Write-Host "    - Audience:       $appId" -ForegroundColor Cyan
+        Write-Host ""
+    }
+    catch {
+        Write-Warning "Could not configure Foundry authentication: $($_.Exception.Message)"
+        Write-Host "  You can configure this manually in the Azure Portal."
+    }
+}
+
+# =============================================================================
 # Configure API Permissions
 # =============================================================================
 
@@ -300,6 +392,10 @@ AZURE_CLIENT_SECRET=$clientSecret
 # Microsoft Graph API Scope (for client credentials flow)
 GRAPH_SCOPE=https://graph.microsoft.com/.default
 
+# Foundry Authentication (Application ID URI / Audience)
+# Use this value as the 'Audience' when configuring MCP in Foundry
+FOUNDRY_AUDIENCE=$appId
+
 # Server Configuration
 PORT=3000
 HOST=0.0.0.0
@@ -332,12 +428,22 @@ Write-Host "  Client ID:        $appId" -ForegroundColor Cyan
 if ($clientSecret) {
     Write-Host "  Client Secret:    ****$(($clientSecret).Substring([Math]::Max(0, $clientSecret.Length - 4)))" -ForegroundColor Cyan
 }
+if ($identifierUri) {
+    Write-Host "  App ID URI:       $identifierUri" -ForegroundColor Cyan
+}
 Write-Host ""
 
 Write-Host "Configured Permissions:" -ForegroundColor White
 Write-Host "  • Files.ReadWrite.All   - Read/write files in SharePoint/OneDrive"
 Write-Host "  • Sites.ReadWrite.All   - Read/write items in all site collections"
 Write-Host ""
+
+if ($EnableFoundryAuth) {
+    Write-Host "Foundry Integration:" -ForegroundColor White
+    Write-Host "  • Authentication:     Microsoft Entra (Project Managed Identity)" -ForegroundColor Cyan
+    Write-Host "  • Audience:           $appId" -ForegroundColor Cyan
+    Write-Host ""
+}
 
 Write-Host "Configuration Files:" -ForegroundColor White
 Write-Host "  • $OutputEnvFile"
@@ -349,11 +455,21 @@ Write-Host "  1. Verify admin consent was granted in Azure Portal"
 Write-Host "  2. For local development:"
 Write-Host "     cd mcp-server && uv run python server.py"
 Write-Host ""
-Write-Host "  3. For Azure deployment, set these azd environment variables:"
-Write-Host "     azd env set AZURE_CLIENT_ID $appId"
-Write-Host "     azd env set AZURE_CLIENT_SECRET <your-secret>"
-Write-Host "     azd up"
+Write-Host "  3. For Azure deployment:"
+Write-Host "     .\scripts\deploy-mcp-server.ps1"
 Write-Host ""
+
+if ($EnableFoundryAuth) {
+    Write-Host "  4. To add to Foundry Agent:" -ForegroundColor Yellow
+    Write-Host "     - Go to https://ai.azure.com → Your Project → Build → Create agent"
+    Write-Host "     - Click '+ Add' in Tools → Custom → Model Context Protocol"
+    Write-Host "     - Configure:"
+    Write-Host "       • Name: MCP Excel Service"
+    Write-Host "       • Authentication: Microsoft Entra"
+    Write-Host "       • Type: Project Managed Identity"
+    Write-Host "       • Audience: $appId"
+    Write-Host ""
+}
 
 # Output for automation
 $result = @{
@@ -362,6 +478,8 @@ $result = @{
     clientSecret = $clientSecret
     appName = $AppName
     envFile = $OutputEnvFile
+    foundryAudience = $appId
+    identifierUri = $identifierUri
 }
 
 # Save as JSON for other scripts to consume
