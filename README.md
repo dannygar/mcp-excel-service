@@ -299,24 +299,39 @@ Update a range of cells in an Excel worksheet with a 2D array of values.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `trades` | string | ✓ | **JSON array** of trade objects (see below) |
-| `reference_date` | string | ✓ | Date to search for in column C (trades append below) |
-| `sheet_name` | string | | Worksheet name (default: "December") |
+| `reference_date` | string | | Date to search for in column C (default: last date in column C) |
+| `sheet_name` | string | | Worksheet name (default: current month, e.g., "December") |
 
 **Trade Object Fields:**
-```json
-{
-  "date": "12/23/2025",      // → Column C
-  "time": "10:30 AM",        // → Column E
-  "strategy": "VPCS",        // → Column I
-  "credit": 0.25,            // → Column J
-  "contracts": 25            // → Column L
-}
-```
+| Field | Column | Type | Description |
+|-------|--------|------|-------------|
+| `open_date` | C | string | Date when trade was opened (e.g., "12/23/2025") |
+| `open_time` | E | string | Time when trade was opened (e.g., "10:30 AM") |
+| `close_date` | F | string | Date when trade was closed, if known |
+| `close_time` | G | string | Time when trade was closed (e.g., "4:00 PM") |
+| `strategy` | I | string | Strategy name (e.g., "VPCS", "VCCS", "IC") |
+| `credit` | J | number | Credit received when opening |
+| `debit` | K | number | Debit paid if closed before expiration |
+| `contracts` | L | integer | Number of contracts |
+| `open_fees` | N | number | Total fees paid when trade was opened |
+| `close_fees` | O | number | Total fees paid if closed before expiration |
+| `sold_call_strike` | Q | number | Strike price for sold calls |
+| `sold_put_strike` | R | number | Strike price for sold puts |
+| `width` | T | number | Width in USD between sold and bought strikes |
+| `expired` | - | boolean | If `true`, auto-fills close_date=open_date, close_time="4:00 PM", debit=0 |
 
-**Example Request:**
+> **Note**: For backward compatibility, `date` and `time` are aliases for `open_date` and `open_time`, and `fees` is an alias for `open_fees`.
+
+**Expired Trade Handling:**
+For 0DTE SPX options that expire worthless, set `"expired": true` in the trade object. The tool will automatically populate:
+- `close_date` = `open_date` (same-day expiration)
+- `close_time` = "4:00 PM" (market close)
+- `debit` = 0 (expired worthless)
+
+**Example Request (with expired trades):**
 ```json
 {
-  "trades": "[{\"date\": \"12/23/2025\", \"time\": \"10:30 AM\", \"strategy\": \"VPCS\", \"credit\": 0.25, \"contracts\": 25}, {\"date\": \"12/23/2025\", \"time\": \"2:15 PM\", \"strategy\": \"IC\", \"credit\": 0.50, \"contracts\": 10}]",
+  "trades": "[{\"open_date\": \"12/23/2025\", \"open_time\": \"10:42 AM\", \"strategy\": \"VCCS\", \"credit\": 0.10, \"contracts\": 25, \"open_fees\": 88.27, \"sold_call_strike\": 6920, \"width\": 15, \"expired\": true}, {\"open_date\": \"12/23/2025\", \"open_time\": \"11:36 AM\", \"strategy\": \"VPCS\", \"credit\": 0.25, \"contracts\": 25, \"open_fees\": 88.27, \"sold_put_strike\": 6860, \"width\": 15, \"expired\": true}]",
   "reference_date": "12/22/2025",
   "sheet_name": "December"
 }
@@ -328,20 +343,43 @@ Update a range of cells in an Excel worksheet with a 2D array of values.
   "status": "success",
   "message": "Successfully logged 2 trades",
   "trades_logged": 2,
-  "file_name": "2025 GY Capital Group LLC Trade Tracker.xlsx",
+  "file_name": "2025 Trade Tracker.xlsx",
   "sheet_name": "December",
   "reference_date": "12/22/2025",
   "results": [
-    {"trade_index": 1, "row": 15, "values": ["12/23/2025", "10:30 AM", "VPCS", 0.25, 25]},
-    {"trade_index": 2, "row": 16, "values": ["12/23/2025", "2:15 PM", "IC", 0.50, 10]}
+    {
+      "trade_index": 1,
+      "row": 15,
+      "open_date": "12/23/2025",
+      "open_time": "10:42 AM",
+      "close_date": "12/23/2025",
+      "close_time": "4:00 PM",
+      "strategy": "VCCS",
+      "credit": 0.10,
+      "debit": 0,
+      "contracts": 25,
+      "expired": true
+    },
+    {
+      "trade_index": 2,
+      "row": 16,
+      "open_date": "12/23/2025",
+      "open_time": "11:36 AM",
+      "close_date": "12/23/2025",
+      "close_time": "4:00 PM",
+      "strategy": "VPCS",
+      "credit": 0.25,
+      "debit": 0,
+      "contracts": 25,
+      "expired": true
+    }
   ]
 }
 ```
 
 **Simplified Foundry Agent Prompt:**
 ```
-Show me all SPX trades from today (12/23/25, 9:30am-4:00pm EST), 
-then log them to my trade tracker using 12/22/2025 as the reference date.
+Show me all SPX trades from today that expired, then log them to my trade tracker.
 ```
 
 ---
@@ -363,6 +401,7 @@ The MCP server automatically resolves various SharePoint/OneDrive URL formats:
 ```
 ├── mcp-server/
 │   ├── server.py              # MCP server (FastMCP + Streamable HTTP)
+│   ├── config.py              # Configuration (strategy mapping, trade tracker URL)
 │   ├── Dockerfile             # Container image definition
 │   ├── requirements.txt       # Python dependencies
 │   └── pyproject.toml         # Project metadata
@@ -393,6 +432,8 @@ The MCP server automatically resolves various SharePoint/OneDrive URL formats:
 | `AZURE_TENANT_ID` | Yes | Azure AD tenant ID |
 | `AZURE_CLIENT_ID` | Yes | App Registration client ID |
 | `AZURE_CLIENT_SECRET` | Yes | App Registration client secret |
+| `TRADE_TRACKER_URL` | For logTrades | SharePoint/OneDrive URL for trade tracker |
+| `TRADE_TRACKER_FILE` | For logTrades | Excel filename for trade tracker |
 | `PORT` | No | Server port (default: 3000) |
 | `HOST` | No | Server host (default: 0.0.0.0) |
 
@@ -482,6 +523,9 @@ azd monitor --logs
 | Token acquisition failed | Verify AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET |
 | File not found | Verify SharePoint URL format and file name |
 | Health check fails | Ensure Container App is running and PORT is 3000 |
+| `expired` field not working | Check logs - the tool handles both boolean `true` and string `"true"` |
+| Close date/time not populated | Ensure `expired: true` is set in the trade object |
+| Module 'config' not found | Ensure `config.py` is copied in Dockerfile |
 
 ---
 
