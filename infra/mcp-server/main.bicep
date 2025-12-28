@@ -25,6 +25,18 @@ param tradeTrackerUrl string = ''
 @description('Excel file name for the trade tracker workbook')
 param tradeTrackerFile string = ''
 
+@description('Container image name (set by azd deploy)')
+param imageName string = ''
+
+@description('Enable Microsoft Entra ID authentication')
+param enableEntraAuth bool = false
+
+@description('Microsoft Entra ID Client ID (Application ID) - used as audience for token validation')
+param entraClientId string = ''
+
+@description('Microsoft Entra ID Tenant ID')
+param entraTenantId string = ''
+
 // Optional parameters
 param containerAppName string = ''
 param containerRegistryName string = ''
@@ -101,12 +113,17 @@ module containerApp 'container-app.bicep' = {
     tags: union(tags, { 'azd-service-name': 'mcp-server' })
     containerAppsEnvironmentId: containerAppsEnvironment.outputs.resourceId
     containerRegistryName: containerRegistry.outputs.name
+    containerRegistryLoginServer: containerRegistry.outputs.loginServer
     applicationInsightsConnectionString: applicationInsights.outputs.connectionString
     azureTenantId: !empty(azureTenantId) ? azureTenantId : tenant().tenantId
     azureClientId: azureClientId
     azureClientSecret: azureClientSecret
     tradeTrackerUrl: tradeTrackerUrl
     tradeTrackerFile: tradeTrackerFile
+    imageName: imageName
+    enableEntraAuth: enableEntraAuth
+    entraClientId: entraClientId
+    entraTenantId: entraTenantId
   }
 }
 
@@ -121,3 +138,4 @@ output AZURE_CONTAINER_APP_NAME string = containerApp.outputs.name
 output AZURE_CONTAINER_APP_FQDN string = containerApp.outputs.fqdn
 output MCP_ENDPOINT string = 'https://${containerApp.outputs.fqdn}/mcp'
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = applicationInsights.outputs.connectionString
+output AUTH_ENABLED bool = containerApp.outputs.authEnabled

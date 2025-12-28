@@ -186,6 +186,50 @@ if (-not $existingSp) {
     Write-Success "Service Principal already exists"
 }
 
+# Store service principal ID for role assignment
+$servicePrincipalId = (az ad sp show --id $appId --query id -o tsv)
+
+# =============================================================================
+# Add App Role for MCP Tools Access (Foundry Integration)
+# =============================================================================
+
+$appRoleId = ""
+
+if ($EnableFoundryAuth) {
+    Write-Step "Adding app role for MCP tool access..."
+    
+    $appRoleId = [guid]::NewGuid().ToString()
+    $appRoleJson = @{
+        appRoles = @(
+            @{
+                id = $appRoleId
+                displayName = "MCP Excel Service Tools ReadWrite All"
+                description = "Application permission for MCP Excel Service tool calls"
+                value = "Mcp.Tools.ReadWrite.All"
+                isEnabled = $true
+                allowedMemberTypes = @("Application")
+            }
+        )
+    } | ConvertTo-Json -Depth 10
+    
+    # Write to temp file for az cli
+    $appRoleTempFile = [System.IO.Path]::GetTempFileName()
+    $appRoleJson | Out-File -FilePath $appRoleTempFile -Encoding utf8
+    
+    # Update app with app role using Graph API
+    $graphUrl = "https://graph.microsoft.com/v1.0/applications/$objectId"
+    $result = az rest --method PATCH --uri $graphUrl --body "@$appRoleTempFile" --headers "Content-Type=application/json" 2>&1
+    
+    Remove-Item $appRoleTempFile -Force -ErrorAction SilentlyContinue
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Added app role: Mcp.Tools.ReadWrite.All"
+        Write-Host "  App Role ID: $appRoleId"
+    } else {
+        Write-Warning "Could not add app role (may already exist): $result"
+    }
+}
+
 # =============================================================================
 # Configure Foundry Authentication (Application ID URI)
 # =============================================================================
@@ -480,6 +524,8 @@ $result = @{
     envFile = $OutputEnvFile
     foundryAudience = $appId
     identifierUri = $identifierUri
+    appRoleId = $appRoleId
+    servicePrincipalId = $servicePrincipalId
 }
 
 # Save as JSON for other scripts to consume
@@ -490,6 +536,18 @@ if (-not (Test-Path $resultDir)) {
 }
 $result | ConvertTo-Json | Out-File -FilePath $resultJsonPath -Encoding UTF8
 Write-Host "JSON output saved to: $resultJsonPath" -ForegroundColor Gray
+
+# Output scripting variables (for compatibility with TastyTrade pattern)
+Write-Host ""
+Write-Host "# For scripting, use these outputs:" -ForegroundColor DarkGray
+Write-Host "# ENTRA_TENANT_ID=$tenantId" -ForegroundColor DarkGray
+Write-Host "# ENTRA_CLIENT_ID=$appId" -ForegroundColor DarkGray
+if ($appRoleId) {
+    Write-Host "# ENTRA_APP_ROLE_ID=$appRoleId" -ForegroundColor DarkGray
+}
+if ($servicePrincipalId) {
+    Write-Host "# ENTRA_SERVICE_PRINCIPAL_ID=$servicePrincipalId" -ForegroundColor DarkGray
+}
 
 # Return the result for use in other scripts
 return $result

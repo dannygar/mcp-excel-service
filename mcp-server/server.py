@@ -6,26 +6,57 @@ Uses Microsoft Graph API to interact with Excel files in SharePoint/OneDrive.
 Designed for deployment on Azure Container Apps with Foundry Agent integration.
 
 Authentication:
-    Uses Azure AD service principal (client credentials flow) for Graph API access.
+    - Incoming requests: Validates Microsoft Entra ID bearer tokens from Foundry agents.
+      Requires Project Managed Identity authentication with valid audience.
+    - Outgoing Graph API calls: Uses Azure AD service principal (client credentials flow).
+    
     Required environment variables:
     - AZURE_TENANT_ID: Azure AD tenant ID
-    - AZURE_CLIENT_ID: App registration client ID
-    - AZURE_CLIENT_SECRET: App registration client secret
+    - AZURE_CLIENT_ID: App registration client ID (also used as audience for token validation)
+    - AZURE_CLIENT_SECRET: App registration client secret (for Graph API access)
+
+Security:
+    - All MCP endpoints require valid Entra ID bearer token (401 for invalid/missing)
+    - Token audience must match AZURE_CLIENT_ID
+    - Token issuer must be from configured tenant
+    - Health endpoint (/health) is public for Container Apps probes
 """
 
 import os
 import json
 import logging
-import time
-import re
-from datetime import datetime, timedelta
-from typing import Optional, Union
+from datetime import datetime
 
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+# Import authentication components
+from auth import (
+    ENTRA_AUTH_ENABLED,
+    ENTRA_TENANT_ID,
+    ENTRA_CLIENT_ID,
+    EntraAuthMiddleware,
+    configure_auth_middleware,
+)
+
+# Import Graph API helpers
+from graph_api import (
+    get_graph_headers,
+    build_workbook_url,
+)
+
+# Import Excel helpers
+from excel_helpers import (
+    parse_date_string,
+    excel_serial_to_date,
+    resolve_excel_file_ids,
+)
+
+# Import core operations (for excel.updateRowByLookup tool)
+from core_operations import update_row_by_lookup_impl
 
 # Import configuration
 from config import (
@@ -43,649 +74,6 @@ load_dotenv()
 
 # Initialize MCP server
 mcp = FastMCP("MCP Excel Service")
-
-# Microsoft Graph API base URL
-GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
-
-
-# Token cache for client credentials flow
-_token_cache = {
-    "access_token": None,
-    "expires_at": 0,
-}
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def parse_date_string(value: str) -> datetime | None:
-    """
-    Try to parse a string as a date using common formats.
-    
-    Supported formats:
-    - MM/DD/YYYY (e.g., 12/22/2025)
-    - YYYY-MM-DD (e.g., 2025-12-22)
-    - M/D/YYYY (e.g., 1/5/2025)
-    - DD-MM-YYYY (e.g., 22-12-2025)
-    
-    Returns:
-        datetime object if parsing succeeds, None otherwise
-    """
-    date_formats = [
-        "%m/%d/%Y",  # 12/22/2025
-        "%Y-%m-%d",  # 2025-12-22
-        "%d-%m-%Y",  # 22-12-2025
-        "%m-%d-%Y",  # 12-22-2025
-        "%Y/%m/%d",  # 2025/12/22
-    ]
-    
-    for fmt in date_formats:
-        try:
-            return datetime.strptime(value.strip(), fmt)
-        except ValueError:
-            continue
-    
-    return None
-
-
-def date_to_excel_serial(dt: datetime) -> int:
-    """
-    Convert a datetime object to an Excel serial number.
-    
-    Excel serial numbers count days since January 1, 1900 (with a bug that
-    treats 1900 as a leap year, so dates after Feb 28, 1900 are off by 1).
-    
-    Args:
-        dt: datetime object to convert
-    
-    Returns:
-        Excel serial number as integer
-    """
-    # Excel's epoch is December 30, 1899 (to account for the leap year bug)
-    excel_epoch = datetime(1899, 12, 30)
-    delta = dt - excel_epoch
-    return delta.days
-
-
-def excel_serial_to_date(serial: Union[int, float]) -> datetime:
-    """
-    Convert an Excel serial number to a datetime object.
-    
-    Args:
-        serial: Excel serial number
-    
-    Returns:
-        datetime object
-    """
-    excel_epoch = datetime(1899, 12, 30)
-    return excel_epoch + timedelta(days=int(serial))
-
-
-def is_likely_date_string(value: str) -> bool:
-    """
-    Check if a string looks like a date format.
-    
-    Returns:
-        True if the string matches common date patterns
-    """
-    # Pattern for common date formats: M/D/YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.
-    date_patterns = [
-        r'^\d{1,2}/\d{1,2}/\d{4}$',  # M/D/YYYY or MM/DD/YYYY
-        r'^\d{4}-\d{2}-\d{2}$',       # YYYY-MM-DD
-        r'^\d{2}-\d{2}-\d{4}$',       # DD-MM-YYYY or MM-DD-YYYY
-        r'^\d{4}/\d{2}/\d{2}$',       # YYYY/MM/DD
-    ]
-    
-    for pattern in date_patterns:
-        if re.match(pattern, value.strip()):
-            return True
-    return False
-
-
-def compare_values_for_search(cell_value, reference_value: str) -> bool:
-    """
-    Compare a cell value with a reference value for search, handling date conversions.
-    
-    If the reference_value looks like a date string and the cell contains a number
-    that could be an Excel serial date, convert and compare as dates.
-    
-    Args:
-        cell_value: The value from the Excel cell (could be number, string, etc.)
-        reference_value: The value to search for (always a string)
-    
-    Returns:
-        True if values match, False otherwise
-    """
-    if cell_value is None:
-        return False
-    
-    # Direct string comparison first
-    if str(cell_value) == str(reference_value):
-        return True
-    
-    # Check if reference_value looks like a date
-    if is_likely_date_string(reference_value):
-        parsed_date = parse_date_string(reference_value)
-        if parsed_date:
-            # Convert to Excel serial number
-            reference_serial = date_to_excel_serial(parsed_date)
-            
-            # Check if cell_value is a number (potential Excel date serial)
-            try:
-                cell_serial = float(cell_value)
-                # Excel dates are typically > 1 and < 2958465 (year 9999)
-                if 1 <= cell_serial <= 2958465:
-                    # Compare as integers (dates are whole numbers)
-                    if int(cell_serial) == reference_serial:
-                        return True
-            except (ValueError, TypeError):
-                pass
-    
-    # Check if cell_value is a number that might be an Excel date serial
-    # and reference_value is also numeric
-    try:
-        cell_num = float(cell_value)
-        ref_num = float(reference_value)
-        if cell_num == ref_num:
-            return True
-    except (ValueError, TypeError):
-        pass
-    
-    return False
-
-
-def get_client_credentials() -> tuple[str, str, str]:
-    """Get Azure AD client credentials from environment."""
-    tenant_id = os.getenv("AZURE_TENANT_ID")
-    client_id = os.getenv("AZURE_CLIENT_ID")
-    client_secret = os.getenv("AZURE_CLIENT_SECRET")
-    
-    if not all([tenant_id, client_id, client_secret]):
-        missing = []
-        if not tenant_id:
-            missing.append("AZURE_TENANT_ID")
-        if not client_id:
-            missing.append("AZURE_CLIENT_ID")
-        if not client_secret:
-            missing.append("AZURE_CLIENT_SECRET")
-        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
-    
-    return tenant_id, client_id, client_secret
-
-
-async def get_access_token() -> str:
-    """
-    Get Microsoft Graph API access token using client credentials flow.
-    
-    Implements token caching to avoid unnecessary token requests.
-    Tokens are refreshed 5 minutes before expiration.
-    """
-    global _token_cache
-    
-    # Check if we have a valid cached token (with 5-minute buffer)
-    if _token_cache["access_token"] and time.time() < _token_cache["expires_at"] - 300:
-        return _token_cache["access_token"]
-    
-    logger.info("Acquiring new access token via client credentials flow")
-    
-    tenant_id, client_id, client_secret = get_client_credentials()
-    
-    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    
-    token_data = {
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "scope": "https://graph.microsoft.com/.default",
-    }
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            token_url,
-            data=token_data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30.0,
-        )
-        
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
-            error_desc = error_data.get("error_description", response.text)
-            raise ValueError(f"Failed to acquire token: {error_desc}")
-        
-        token_response = response.json()
-        
-        # Cache the token
-        _token_cache["access_token"] = token_response["access_token"]
-        _token_cache["expires_at"] = time.time() + token_response.get("expires_in", 3600)
-        
-        logger.info("Successfully acquired new access token")
-        return _token_cache["access_token"]
-
-
-async def get_graph_headers() -> dict:
-    """Get headers for Microsoft Graph API requests."""
-    token = await get_access_token()
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-
-def build_workbook_url(
-    drive_id: str,
-    item_id: str,
-    site_id: Optional[str] = None,
-) -> str:
-    """
-    Build the base URL for workbook operations.
-    
-    Args:
-        drive_id: The ID of the drive containing the Excel file
-        item_id: The ID of the Excel file item
-        site_id: Optional SharePoint site ID (for SharePoint-hosted files)
-    
-    Returns:
-        Base URL for workbook operations
-    """
-    if site_id:
-        return f"{GRAPH_API_BASE}/sites/{site_id}/drives/{drive_id}/items/{item_id}/workbook"
-    return f"{GRAPH_API_BASE}/drives/{drive_id}/items/{item_id}/workbook"
-
-
-def parse_sharepoint_url(url: str) -> dict:
-    """
-    Parse a SharePoint or OneDrive URL to extract components.
-    
-    Supports formats:
-    - https://{tenant}.sharepoint.com/sites/{sitename}/Shared%20Documents/{path}
-    - https://{tenant}.sharepoint.com/Shared%20Documents/{path}
-    - https://{tenant}-my.sharepoint.com/personal/{user}/Documents/{path}
-    
-    Returns:
-        Dictionary with hostname, site_path, and file_path
-    """
-    from urllib.parse import urlparse, unquote
-    
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    path = unquote(parsed.path)
-    
-    # Remove trailing slashes and query params
-    path = path.rstrip('/')
-    
-    # Common document library names and their variations
-    doc_lib_patterns = [
-        '/Shared Documents/',
-        '/Documents/',
-        '/Shared%20Documents/',
-    ]
-    
-    site_path = ""
-    file_path = ""
-    
-    # Check if this is a /sites/ or /teams/ URL
-    if '/sites/' in path or '/teams/' in path:
-        # Extract site path (e.g., /sites/MySite)
-        parts = path.split('/')
-        for i, part in enumerate(parts):
-            if part in ('sites', 'teams') and i + 1 < len(parts):
-                site_path = f"/{part}/{parts[i + 1]}"
-                # Find the document library and file path
-                remaining = '/'.join(parts[i + 2:])
-                for pattern in doc_lib_patterns:
-                    clean_pattern = pattern.strip('/')
-                    if remaining.startswith(clean_pattern):
-                        file_path = remaining[len(clean_pattern):].lstrip('/')
-                        break
-                    elif '/' in remaining:
-                        # The first segment after site is the library
-                        lib_and_path = remaining.split('/', 1)
-                        if len(lib_and_path) > 1:
-                            file_path = lib_and_path[1]
-                break
-    elif '/personal/' in path:
-        # OneDrive for Business: /personal/{user}/Documents/{path}
-        parts = path.split('/')
-        for i, part in enumerate(parts):
-            if part == 'personal' and i + 1 < len(parts):
-                site_path = f"/personal/{parts[i + 1]}"
-                remaining = '/'.join(parts[i + 2:])
-                for pattern in doc_lib_patterns:
-                    clean_pattern = pattern.strip('/')
-                    if remaining.startswith(clean_pattern):
-                        file_path = remaining[len(clean_pattern):].lstrip('/')
-                        break
-                break
-    else:
-        # Root site with document library
-        for pattern in doc_lib_patterns:
-            clean_pattern = pattern.strip('/')
-            if clean_pattern in path:
-                idx = path.find(clean_pattern)
-                file_path = path[idx + len(clean_pattern):].lstrip('/')
-                break
-    
-    # Handle Forms/AllItems.aspx view URLs - extract the folder path
-    if 'Forms/AllItems.aspx' in file_path:
-        file_path = file_path.replace('Forms/AllItems.aspx', '').rstrip('/')
-    
-    return {
-        "hostname": hostname,
-        "site_path": site_path,
-        "file_path": file_path,
-    }
-
-
-async def resolve_excel_file_ids(
-    url: str,
-    file_name: str,
-) -> dict:
-    """
-    Internal helper to resolve a SharePoint or OneDrive URL to get the IDs needed for Excel operations.
-    
-    Args:
-        url: The SharePoint or OneDrive URL pointing to a site or document library.
-        file_name: The name of the Excel file (with .xlsx extension).
-    
-    Returns:
-        Dictionary with status, site_id, drive_id, item_id, and file metadata.
-        On error, returns dict with status='error' and message.
-    """
-    try:
-        headers = await get_graph_headers()
-        
-        # Parse the URL
-        parsed = parse_sharepoint_url(url)
-        hostname = parsed["hostname"]
-        site_path = parsed["site_path"]
-        
-        if not hostname:
-            return {
-                "status": "error",
-                "message": "Could not parse hostname from URL",
-            }
-        
-        logger.info(f"Resolving URL - hostname: {hostname}, site_path: {site_path}, file_name: {file_name}")
-        
-        async with httpx.AsyncClient() as client:
-            # Step 1: Get the site ID
-            if site_path:
-                site_url = f"{GRAPH_API_BASE}/sites/{hostname}:{site_path}"
-            else:
-                site_url = f"{GRAPH_API_BASE}/sites/{hostname}"
-            
-            logger.info(f"Getting site from: {site_url}")
-            site_response = await client.get(site_url, headers=headers, timeout=30.0)
-            
-            if site_response.status_code != 200:
-                error_data = site_response.json() if site_response.content else {}
-                error_message = error_data.get("error", {}).get("message", site_response.text)
-                return {
-                    "status": "error",
-                    "message": f"Failed to get site: {error_message}",
-                    "status_code": site_response.status_code,
-                }
-            
-            site_data = site_response.json()
-            site_id = site_data["id"]
-            logger.info(f"Found site ID: {site_id}")
-            
-            # Step 2: Get the drives (document libraries) for the site
-            drives_url = f"{GRAPH_API_BASE}/sites/{site_id}/drives"
-            drives_response = await client.get(drives_url, headers=headers, timeout=30.0)
-            
-            if drives_response.status_code != 200:
-                error_data = drives_response.json() if drives_response.content else {}
-                error_message = error_data.get("error", {}).get("message", drives_response.text)
-                return {
-                    "status": "error",
-                    "message": f"Failed to get drives: {error_message}",
-                    "status_code": drives_response.status_code,
-                }
-            
-            drives_data = drives_response.json()
-            
-            # Find the Documents/Shared Documents drive
-            drive_id = None
-            drive_name = None
-            for drive in drives_data.get("value", []):
-                # Look for the default document library
-                if drive.get("name") in ("Documents", "Shared Documents") or \
-                   drive.get("driveType") == "documentLibrary":
-                    drive_id = drive["id"]
-                    drive_name = drive.get("name")
-                    break
-            
-            if not drive_id and drives_data.get("value"):
-                # Fall back to the first drive
-                drive_id = drives_data["value"][0]["id"]
-                drive_name = drives_data["value"][0].get("name")
-            
-            if not drive_id:
-                return {
-                    "status": "error",
-                    "message": "No document library found for this site",
-                }
-            
-            logger.info(f"Found drive ID: {drive_id} ({drive_name})")
-            
-            # Step 3: Get the file item by path
-            item_url = f"{GRAPH_API_BASE}/drives/{drive_id}/root:/{file_name}"
-            logger.info(f"Getting item from: {item_url}")
-            item_response = await client.get(item_url, headers=headers, timeout=30.0)
-            
-            if item_response.status_code != 200:
-                error_data = item_response.json() if item_response.content else {}
-                error_message = error_data.get("error", {}).get("message", item_response.text)
-                return {
-                    "status": "error", 
-                    "message": f"Failed to get item: {error_message}",
-                    "status_code": item_response.status_code,
-                    "site_id": site_id,
-                    "drive_id": drive_id,
-                    "attempted_path": file_name,
-                }
-            
-            item_data = item_response.json()
-            item_id = item_data["id"]
-            
-            logger.info(f"Found item ID: {item_id}")
-            
-            # Return all the resolved IDs
-            return {
-                "status": "success",
-                "message": "Successfully resolved all IDs from URL",
-                "site_id": site_id,
-                "site_name": site_data.get("displayName"),
-                "drive_id": drive_id,
-                "drive_name": drive_name,
-                "item_id": item_id,
-                "file_name": item_data.get("name"),
-                "file_path": file_name,
-                "web_url": item_data.get("webUrl"),
-                "size": item_data.get("size"),
-                "last_modified": item_data.get("lastModifiedDateTime"),
-            }
-            
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error resolving URL: {e}")
-        return {
-            "status": "error",
-            "message": f"HTTP error: {str(e)}",
-        }
-    except Exception as e:
-        logger.error(f"Error resolving URL: {e}")
-        return {
-            "status": "error",
-            "message": str(e),
-        }
-
-
-# =============================================================================
-# Core Implementation Functions (called by tools)
-# =============================================================================
-
-async def _update_row_by_lookup_impl(
-    url: str,
-    file_name: str,
-    sheet_name: str,
-    search_column: str,
-    reference_value: str,
-    target_columns_list: list,
-    values_list: list,
-    row_offset: int = 0
-) -> dict:
-    """
-    Core implementation for updating a row by lookup.
-    Returns a dict with the result (not a JSON string).
-    This is the internal implementation called by both tools.
-    """
-    # Validate that columns and values have the same length
-    if len(target_columns_list) != len(values_list):
-        return {
-            "status": "error",
-            "message": f"Mismatch: {len(target_columns_list)} columns but {len(values_list)} values provided. They must be equal.",
-        }
-    
-    # Resolve URL to get drive_id, item_id, and site_id
-    resolved = await resolve_excel_file_ids(url, file_name)
-    if resolved.get("status") != "success":
-        return resolved
-    
-    drive_id = resolved["drive_id"]
-    item_id = resolved["item_id"]
-    site_id = resolved.get("site_id")
-    
-    workbook_url = build_workbook_url(drive_id, item_id, site_id)
-    headers = await get_graph_headers()
-    
-    async with httpx.AsyncClient() as client:
-        # Step 1: Get the used range to find the data extent
-        used_range_url = f"{workbook_url}/worksheets/{sheet_name}/usedRange"
-        logger.info(f"Getting used range for sheet '{sheet_name}'")
-        
-        used_range_response = await client.get(
-            used_range_url,
-            headers=headers,
-            timeout=30.0,
-        )
-        
-        if used_range_response.status_code != 200:
-            error_data = used_range_response.json() if used_range_response.content else {}
-            error_message = error_data.get("error", {}).get("message", used_range_response.text)
-            return {
-                "status": "error",
-                "message": f"Failed to get used range: {error_message}",
-                "status_code": used_range_response.status_code,
-            }
-        
-        used_range_data = used_range_response.json()
-        row_count = used_range_data.get("rowCount", 0)
-        
-        if row_count == 0:
-            return {
-                "status": "error",
-                "message": "Worksheet is empty",
-            }
-        
-        # Step 2: Get the search column values
-        search_range = f"{search_column}1:{search_column}{row_count}"
-        search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
-        logger.info(f"Searching column {search_column} for value '{reference_value}'")
-        
-        search_response = await client.get(
-            search_url,
-            headers=headers,
-            timeout=30.0,
-        )
-        
-        if search_response.status_code != 200:
-            error_data = search_response.json() if search_response.content else {}
-            error_message = error_data.get("error", {}).get("message", search_response.text)
-            return {
-                "status": "error",
-                "message": f"Failed to read search column: {error_message}",
-                "status_code": search_response.status_code,
-            }
-        
-        search_data = search_response.json()
-        column_values = search_data.get("values", [])
-        
-        # Step 3: Find the row with the reference value
-        found_row = None
-        for i, row in enumerate(column_values):
-            cell_value = row[0] if row else None
-            # Use smart comparison that handles date conversions
-            if compare_values_for_search(cell_value, reference_value):
-                found_row = i + 1  # Excel rows are 1-indexed
-                logger.info(f"Found match: cell value '{cell_value}' matches reference '{reference_value}'")
-                break
-        
-        if found_row is None:
-            # Provide more diagnostic info in the error message
-            sample_values = [str(row[0]) if row and row[0] is not None else "empty" 
-                            for row in column_values[:10]]
-            return {
-                "status": "error",
-                "message": f"Reference value '{reference_value}' not found in column {search_column}",
-                "searched_rows": row_count,
-                "sample_values": sample_values,
-                "hint": "If searching for a date, ensure format matches (e.g., '12/22/2025' or '2025-12-22')"
-            }
-        
-        # Apply row offset
-        target_row = found_row + row_offset
-        logger.info(f"Found reference value in row {found_row}, target row is {target_row} (offset: {row_offset})")
-        
-        # Step 4: Update each cell individually
-        updated_cells = []
-        errors = []
-        
-        for col, value in zip(target_columns_list, values_list):
-            cell_address = f"{col.upper()}{target_row}"
-            cell_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{cell_address}')"
-            
-            body = {
-                "values": [[value]],
-            }
-            
-            logger.info(f"Updating cell '{cell_address}' with value '{value}'")
-            
-            update_response = await client.patch(
-                cell_url,
-                headers=headers,
-                json=body,
-                timeout=30.0,
-            )
-            
-            if update_response.status_code == 200:
-                updated_cells.append(cell_address)
-            else:
-                error_data = update_response.json() if update_response.content else {}
-                error_message = error_data.get("error", {}).get("message", update_response.text)
-                errors.append({"cell": cell_address, "error": error_message})
-        
-        if errors:
-            return {
-                "status": "partial_error",
-                "message": f"Some cells failed to update",
-                "updated_cells": updated_cells,
-                "errors": errors,
-            }
-        
-        return {
-            "status": "success",
-            "message": f"Successfully updated {len(values_list)} cells in row {target_row}",
-            "sheet_name": sheet_name,
-            "found_row": found_row,
-            "target_row": target_row,
-            "row_offset": row_offset,
-            "reference_value": reference_value,
-            "updated_cells": updated_cells,
-            "columns": target_columns_list,
-            "values_written": len(values_list),
-        }
 
 
 # =============================================================================
@@ -752,7 +140,7 @@ async def excel_update_row_by_lookup(
             }, indent=2)
         
         # Call the core implementation
-        result = await _update_row_by_lookup_impl(
+        result = await update_row_by_lookup_impl(
             url=url,
             file_name=file_name,
             sheet_name=sheet_name,
@@ -885,15 +273,14 @@ async def excel_update_range(
 @mcp.tool(name="excel.logTrades")
 async def excel_log_trades(
     trades: str,
-    reference_date: str = "",
     sheet_name: str = ""
 ) -> str:
     """
     Log multiple trades to the configured trade tracker spreadsheet.
     
-    This tool appends trade data below a reference date row in the spreadsheet.
-    The spreadsheet URL and file name are configured via environment variables
-    (TRADE_TRACKER_URL, TRADE_TRACKER_FILE).
+    This tool automatically finds the last row with a valid date in column C and
+    appends trade data starting from the next row. The spreadsheet URL and file name
+    are configured via environment variables (TRADE_TRACKER_URL, TRADE_TRACKER_FILE).
     
     Args:
         trades: JSON array of trade objects. Each object can have:
@@ -919,9 +306,6 @@ async def excel_log_trades(
                 Example: '[{"open_date": "12/23/2025", "open_time": "10:30 AM", "strategy": "IC", 
                            "credit": 0.60, "contracts": 25, "open_fees": 176.58, 
                            "sold_call_strike": 6100, "sold_put_strike": 5800, "width": 15, "expired": true}]'
-        reference_date: Date to search for in column C. Trades will be appended below this row.
-                       Format: "MM/DD/YYYY" (e.g., "12/22/2025"). If not provided, uses the
-                       last non-empty date value in column C.
         sheet_name: Worksheet name (default: current month, e.g., "December").
     
     Returns:
@@ -959,7 +343,7 @@ async def excel_log_trades(
     COLUMN_ORDER = ["C", "E", "F", "G", "I", "J", "K", "L", "N", "O", "Q", "R", "T"]
     
     # Log incoming parameters for debugging
-    logger.info(f"excel.logTrades called with reference_date='{reference_date}', sheet_name='{sheet_name}'")
+    logger.info(f"excel.logTrades called with sheet_name='{sheet_name}'")
     logger.info(f"Raw trades input (first 500 chars): {trades[:500] if len(trades) > 500 else trades}")
     
     try:
@@ -1025,99 +409,98 @@ async def excel_log_trades(
         trades_list.sort(key=parse_trade_datetime)
         logger.info(f"Sorted {len(trades_list)} trades by open_date and open_time (ascending)")
         
-        # If reference_date not provided, find the last non-empty date in column C
-        if not reference_date:
-            logger.info(f"No reference_date provided, finding last date in column C of sheet '{sheet_name}'")
+        # Find the last non-empty date in column C to determine where to insert new rows
+        logger.info(f"Finding last date in column C of sheet '{sheet_name}'")
+        
+        # Resolve URL to get drive_id, item_id, and site_id
+        resolved = await resolve_excel_file_ids(TRADE_TRACKER_URL, TRADE_TRACKER_FILE)
+        if resolved.get("status") != "success":
+            return json.dumps({
+                "status": "error",
+                "message": f"Failed to resolve Excel file: {resolved.get('message')}",
+            }, indent=2)
+        
+        drive_id = resolved["drive_id"]
+        item_id = resolved["item_id"]
+        site_id = resolved.get("site_id")
+        workbook_url = build_workbook_url(drive_id, item_id, site_id)
+        headers = await get_graph_headers()
+        
+        async with httpx.AsyncClient() as client:
+            # Get used range to find data extent
+            used_range_url = f"{workbook_url}/worksheets/{sheet_name}/usedRange"
+            used_range_response = await client.get(used_range_url, headers=headers, timeout=30.0)
             
-            # Resolve URL to get drive_id, item_id, and site_id
-            resolved = await resolve_excel_file_ids(TRADE_TRACKER_URL, TRADE_TRACKER_FILE)
-            if resolved.get("status") != "success":
+            if used_range_response.status_code != 200:
+                error_data = used_range_response.json() if used_range_response.content else {}
+                error_message = error_data.get("error", {}).get("message", used_range_response.text)
                 return json.dumps({
                     "status": "error",
-                    "message": f"Failed to resolve Excel file: {resolved.get('message')}",
+                    "message": f"Failed to get worksheet data: {error_message}",
                 }, indent=2)
             
-            drive_id = resolved["drive_id"]
-            item_id = resolved["item_id"]
-            site_id = resolved.get("site_id")
-            workbook_url = build_workbook_url(drive_id, item_id, site_id)
-            headers = await get_graph_headers()
+            used_range_data = used_range_response.json()
+            row_count = used_range_data.get("rowCount", 0)
             
-            async with httpx.AsyncClient() as client:
-                # Get used range to find data extent
-                used_range_url = f"{workbook_url}/worksheets/{sheet_name}/usedRange"
-                used_range_response = await client.get(used_range_url, headers=headers, timeout=30.0)
-                
-                if used_range_response.status_code != 200:
-                    error_data = used_range_response.json() if used_range_response.content else {}
-                    error_message = error_data.get("error", {}).get("message", used_range_response.text)
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Failed to get worksheet data: {error_message}",
-                    }, indent=2)
-                
-                used_range_data = used_range_response.json()
-                row_count = used_range_data.get("rowCount", 0)
-                
-                if row_count == 0:
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Worksheet '{sheet_name}' is empty",
-                    }, indent=2)
-                
-                # Get column C values
-                search_range = f"C1:C{row_count}"
-                search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
-                search_response = await client.get(search_url, headers=headers, timeout=30.0)
-                
-                if search_response.status_code != 200:
-                    error_data = search_response.json() if search_response.content else {}
-                    error_message = error_data.get("error", {}).get("message", search_response.text)
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Failed to read column C: {error_message}",
-                    }, indent=2)
-                
-                search_data = search_response.json()
-                column_values = search_data.get("values", [])
-                
-                # Find the last non-empty cell with a valid date value (searching from bottom)
-                last_date_value = None
-                last_date_row = None
-                
-                for i in range(len(column_values) - 1, -1, -1):
-                    cell_value = column_values[i][0] if column_values[i] else None
-                    if cell_value is not None and cell_value != "":
-                        # Check if it's a valid date (either Excel serial number or date string)
-                        try:
-                            # If it's a number (Excel serial date), convert to date string
-                            if isinstance(cell_value, (int, float)) and 1 <= cell_value <= 2958465:
-                                dt = excel_serial_to_date(cell_value)
-                                reference_date = dt.strftime("%m/%d/%Y")
+            if row_count == 0:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Worksheet '{sheet_name}' is empty",
+                }, indent=2)
+            
+            # Get column C values
+            search_range = f"C1:C{row_count}"
+            search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
+            search_response = await client.get(search_url, headers=headers, timeout=30.0)
+            
+            if search_response.status_code != 200:
+                error_data = search_response.json() if search_response.content else {}
+                error_message = error_data.get("error", {}).get("message", search_response.text)
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to read column C: {error_message}",
+                }, indent=2)
+            
+            search_data = search_response.json()
+            column_values = search_data.get("values", [])
+            
+            # Find the last non-empty cell with a valid date value (searching from bottom)
+            last_date_value = None
+            last_date_row = None
+            
+            for i in range(len(column_values) - 1, -1, -1):
+                cell_value = column_values[i][0] if column_values[i] else None
+                if cell_value is not None and cell_value != "":
+                    # Check if it's a valid date (either Excel serial number or date string)
+                    try:
+                        # If it's a number (Excel serial date), convert to date string
+                        if isinstance(cell_value, (int, float)) and 1 <= cell_value <= 2958465:
+                            dt = excel_serial_to_date(cell_value)
+                            last_date_display = dt.strftime("%m/%d/%Y")
+                            last_date_value = cell_value
+                            last_date_row = i + 1
+                            logger.info(f"Found last date at row {last_date_row}: Excel serial {cell_value} → {last_date_display}")
+                            break
+                        # If it's a string, try to parse it as a date
+                        elif isinstance(cell_value, str):
+                            parsed = parse_date_string(cell_value)
+                            if parsed:
+                                last_date_display = cell_value
                                 last_date_value = cell_value
                                 last_date_row = i + 1
-                                logger.info(f"Found last date at row {last_date_row}: Excel serial {cell_value} → {reference_date}")
+                                logger.info(f"Found last date at row {last_date_row}: {last_date_display}")
                                 break
-                            # If it's a string, try to parse it as a date
-                            elif isinstance(cell_value, str):
-                                parsed = parse_date_string(cell_value)
-                                if parsed:
-                                    reference_date = cell_value
-                                    last_date_value = cell_value
-                                    last_date_row = i + 1
-                                    logger.info(f"Found last date at row {last_date_row}: {reference_date}")
-                                    break
-                        except (ValueError, TypeError):
-                            continue
-                
-                if not reference_date:
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Could not find any valid date in column C of sheet '{sheet_name}'",
-                    }, indent=2)
+                    except (ValueError, TypeError):
+                        continue
+            
+            if last_date_row is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Could not find any valid date in column C of sheet '{sheet_name}'",
+                }, indent=2)
         
         logger.info(f"Logging {len(trades_list)} trades to {TRADE_TRACKER_FILE}, sheet '{sheet_name}'")
-        logger.info(f"Reference date: {reference_date}, URL: {TRADE_TRACKER_URL}")
+        logger.info(f"Last date row: {last_date_row}, will start writing at row {last_date_row + 1}")
         
         results = []
         errors = []
@@ -1187,27 +570,53 @@ async def excel_log_trades(
             # Log the values array for debugging
             logger.info(f"Trade {i+1} values array: C={values[0]}, E={values[1]}, F={values[2]}, G={values[3]}, I={values[4]}")
             
-            # Calculate row offset: first trade goes to row_offset=1, second to row_offset=2, etc.
-            current_offset = 1 + i
+            # Calculate target row: first trade goes to last_date_row + 1, second to last_date_row + 2, etc.
+            target_row = last_date_row + 1 + i
             
-            logger.info(f"Logging trade {i+1}/{len(trades_list)}: strategy={mapped_strategy}, credit={trade.get('credit')}, contracts={trade.get('contracts')} at offset {current_offset}")
+            logger.info(f"Logging trade {i+1}/{len(trades_list)}: strategy={mapped_strategy}, credit={trade.get('credit')}, contracts={trade.get('contracts')} to row {target_row}")
             
-            # Call the core implementation directly (not the decorated tool)
-            result_data = await _update_row_by_lookup_impl(
-                url=TRADE_TRACKER_URL,
-                file_name=TRADE_TRACKER_FILE,
-                sheet_name=sheet_name,
-                search_column="C",
-                reference_value=reference_date,
-                target_columns_list=COLUMN_ORDER,
-                values_list=values,
-                row_offset=current_offset
-            )
+            # Write each cell directly to the calculated row
+            updated_cells = []
+            cell_errors = []
             
-            if result_data.get("status") == "success":
+            async with httpx.AsyncClient() as write_client:
+                for col_idx, col_letter in enumerate(COLUMN_ORDER):
+                    value = values[col_idx]
+                    # Skip empty values
+                    if value == "" or value is None:
+                        continue
+                    
+                    cell_address = f"{col_letter}{target_row}"
+                    cell_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{cell_address}')"
+                    
+                    try:
+                        response = await write_client.patch(
+                            cell_url,
+                            headers=headers,
+                            json={"values": [[value]]},
+                            timeout=30.0
+                        )
+                        
+                        if response.status_code in [200, 201]:
+                            updated_cells.append(cell_address)
+                        else:
+                            error_data = response.json() if response.content else {}
+                            error_message = error_data.get("error", {}).get("message", response.text)
+                            cell_errors.append(f"{cell_address}: {error_message}")
+                    except Exception as cell_error:
+                        cell_errors.append(f"{cell_address}: {str(cell_error)}")
+            
+            if cell_errors:
+                errors.append({
+                    "trade_index": i + 1,
+                    "error": f"Failed to update some cells: {', '.join(cell_errors)}",
+                    "strategy": mapped_strategy,
+                    "updated_cells": updated_cells,
+                })
+            else:
                 results.append({
                     "trade_index": i + 1,
-                    "row": result_data.get("target_row"),
+                    "row": target_row,
                     "open_date": open_date,
                     "open_time": open_time,
                     "close_date": close_date,
@@ -1222,12 +631,6 @@ async def excel_log_trades(
                     "sold_put_strike": trade.get("sold_put_strike", ""),
                     "width": trade.get("width", ""),
                     "expired": is_expired,
-                })
-            else:
-                errors.append({
-                    "trade_index": i + 1,
-                    "error": result_data.get("message"),
-                    "strategy": mapped_strategy,
                 })
         
         # Build response
@@ -1245,7 +648,7 @@ async def excel_log_trades(
                 "trades_failed": len(errors),
                 "file_name": TRADE_TRACKER_FILE,
                 "sheet_name": sheet_name,
-                "reference_date": reference_date,
+                "start_row": last_date_row + 1,
                 "results": results,
                 "errors": errors,
             }, indent=2)
@@ -1256,7 +659,7 @@ async def excel_log_trades(
                 "trades_logged": len(results),
                 "file_name": TRADE_TRACKER_FILE,
                 "sheet_name": sheet_name,
-                "reference_date": reference_date,
+                "start_row": last_date_row + 1,
                 "results": results,
             }, indent=2)
             
@@ -1268,19 +671,50 @@ async def excel_log_trades(
         }, indent=2)
 
 
-# Health check endpoint (for Container Apps)
+# =============================================================================
+# Health Check Endpoint
+# =============================================================================
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
     """Health check endpoint for Container Apps."""
-    return JSONResponse({"status": "healthy", "service": "mcp-excel-server"})
+    auth_status = "enabled" if ENTRA_AUTH_ENABLED else "disabled"
+    return JSONResponse({
+        "status": "healthy",
+        "service": "mcp-excel-server",
+        "authentication": auth_status,
+        "tenant_id": ENTRA_TENANT_ID[:8] + "..." if ENTRA_TENANT_ID else "not configured",
+        "client_id": ENTRA_CLIENT_ID[:8] + "..." if ENTRA_CLIENT_ID else "not configured"
+    })
 
+
+# =============================================================================
+# Server Entry Point
+# =============================================================================
 
 if __name__ == "__main__":
+    from starlette.middleware import Middleware
+    
     port = int(os.getenv("PORT", "3000"))
     host = os.getenv("HOST", "0.0.0.0")
     
+    # Configure and log authentication settings
+    configure_auth_middleware()
+    
     logger.info(f"Starting MCP Excel Service on {host}:{port}")
     logger.info(f"MCP endpoint: http://{host}:{port}/mcp")
+    logger.info(f"Health endpoint: http://{host}:{port}/health")
     
-    # Run with HTTP transport (streamable HTTP)
-    mcp.run(transport="http", host=host, port=port)
+    # Build middleware list based on authentication configuration
+    middleware = []
+    if ENTRA_AUTH_ENABLED:
+        logger.info("Adding Entra ID authentication middleware...")
+        middleware.append(Middleware(EntraAuthMiddleware))
+    
+    # Create ASGI app with middleware and run it
+    # Using http_app() allows us to properly configure middleware
+    app = mcp.http_app(middleware=middleware if middleware else None)
+    
+    # Run with uvicorn directly (fastmcp wraps this)
+    import uvicorn
+    uvicorn.run(app, host=host, port=port)

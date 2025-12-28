@@ -22,9 +22,13 @@ WORKDIR /app
 # Copy virtual environment from builder
 COPY --from=builder /app/.venv /app/.venv
 
-# Copy application code
+# Copy application code - all Python modules
 COPY server.py ./
 COPY config.py ./
+COPY auth.py ./
+COPY graph_api.py ./
+COPY excel_helpers.py ./
+COPY core_operations.py ./
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"

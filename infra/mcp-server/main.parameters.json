@@ -22,6 +22,18 @@
     },
     "tradeTrackerFile": {
       "value": "${TRADE_TRACKER_FILE}"
+    },
+    "imageName": {
+      "value": "${SERVICE_MCP_SERVER_IMAGE_NAME}"
+    },
+    "enableEntraAuth": {
+      "value": "${ENABLE_ENTRA_AUTH=false}"
+    },
+    "entraClientId": {
+      "value": "${ENTRA_CLIENT_ID=}"
+    },
+    "entraTenantId": {
+      "value": "${ENTRA_TENANT_ID=}"
     }
   }
 }
