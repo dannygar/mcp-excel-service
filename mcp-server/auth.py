@@ -35,10 +35,11 @@ logger = logging.getLogger("mcp-excel-server")
 ENTRA_TENANT_ID = os.getenv("ENTRA_TENANT_ID") or os.getenv("AZURE_TENANT_ID", "")
 ENTRA_CLIENT_ID = os.getenv("ENTRA_CLIENT_ID") or os.getenv("AZURE_CLIENT_ID", "")  # This is the audience
 
-# Auth is enabled if we have both tenant and client ID configured
-# Note: ENABLE_ENTRA_AUTH env var is no longer needed - we just check if credentials are present
+# Auth can be explicitly disabled for local development (e.g., MCP Inspector testing)
+# Set DISABLE_ENTRA_AUTH=true to skip token validation
+_auth_explicitly_disabled = os.getenv("DISABLE_ENTRA_AUTH", "").lower() in ("true", "1", "yes")
 _has_entra_config = bool(ENTRA_TENANT_ID and ENTRA_CLIENT_ID)
-ENTRA_AUTH_ENABLED = _has_entra_config
+ENTRA_AUTH_ENABLED = _has_entra_config and not _auth_explicitly_disabled
 
 # OIDC/JWT validation settings
 ENTRA_ISSUER_V1 = f"https://sts.windows.net/{ENTRA_TENANT_ID}/"

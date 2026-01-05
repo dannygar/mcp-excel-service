@@ -169,26 +169,46 @@ def parse_sharepoint_url(url: str) -> dict:
     Parse a SharePoint or OneDrive URL to extract components.
     
     Supports formats:
+    - https://{tenant}.sharepoint.com (root site only - hostname)
+    - https://{tenant}.sharepoint.com/sites/{sitename}
     - https://{tenant}.sharepoint.com/sites/{sitename}/Shared%20Documents/{path}
     - https://{tenant}.sharepoint.com/Shared%20Documents/{path}
+    - https://{tenant}.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx (library view URL)
     - https://{tenant}-my.sharepoint.com/personal/{user}/Documents/{path}
     
     Returns:
         Dictionary with hostname, site_path, and file_path
     """
+    if not url:
+        return {"hostname": None, "site_path": "", "file_path": ""}
+    
+    # Strip whitespace and handle URL-encoded strings
+    url = url.strip()
+    
     parsed = urlparse(url)
     hostname = parsed.hostname
-    path = unquote(parsed.path)
+    
+    # If no hostname, try to extract from a path-like string
+    if not hostname:
+        # Maybe it's just a hostname without scheme
+        if '.' in url and '/' not in url.split('.')[0]:
+            # Looks like a hostname (e.g., "contoso.sharepoint.com")
+            hostname = url.split('/')[0]
+        else:
+            return {"hostname": None, "site_path": "", "file_path": ""}
+    
+    path = unquote(parsed.path) if parsed.path else ""
     
     # Remove trailing slashes and query params
     path = path.rstrip('/')
     
-    # Common document library names and their variations
-    doc_lib_patterns = [
-        '/Shared Documents/',
-        '/Documents/',
-        '/Shared%20Documents/',
-    ]
+    # Remove Forms/AllItems.aspx (SharePoint library view URL) from the path FIRST
+    # This is a UI navigation URL, not a file path
+    path = re.sub(r'/Forms/AllItems\.aspx$', '', path, flags=re.IGNORECASE)
+    path = path.rstrip('/')
+    
+    # Common document library names
+    doc_lib_names = ['Shared Documents', 'Documents', 'Shared%20Documents']
     
     site_path = ""
     file_path = ""
@@ -196,48 +216,50 @@ def parse_sharepoint_url(url: str) -> dict:
     # Check if this is a /sites/ or /teams/ URL
     if '/sites/' in path or '/teams/' in path:
         # Extract site path (e.g., /sites/MySite)
-        parts = path.split('/')
-        for i, part in enumerate(parts):
-            if part in ('sites', 'teams') and i + 1 < len(parts):
-                site_path = f"/{part}/{parts[i + 1]}"
-                # Find the document library and file path
-                remaining = '/'.join(parts[i + 2:])
-                for pattern in doc_lib_patterns:
-                    clean_pattern = pattern.strip('/')
-                    if remaining.startswith(clean_pattern):
-                        file_path = remaining[len(clean_pattern):].lstrip('/')
-                        break
-                    elif '/' in remaining:
-                        # The first segment after site is the library
-                        lib_and_path = remaining.split('/', 1)
-                        if len(lib_and_path) > 1:
-                            file_path = lib_and_path[1]
-                break
+        match = re.search(r'(/(sites|teams)/[^/]+)', path, re.IGNORECASE)
+        if match:
+            site_path = match.group(1)
+            # Get everything after the site path
+            remaining = path[match.end():].lstrip('/')
+            
+            # Check if remaining starts with a document library name
+            for lib_name in doc_lib_names:
+                if remaining.lower().startswith(lib_name.lower()):
+                    # Extract path after the library name
+                    file_path = remaining[len(lib_name):].lstrip('/')
+                    break
+            else:
+                # No recognized library name - remaining might be a custom library or file path
+                if '/' in remaining:
+                    # First segment is the library, rest is the path
+                    parts = remaining.split('/', 1)
+                    if len(parts) > 1:
+                        file_path = parts[1]
+                        
     elif '/personal/' in path:
         # OneDrive for Business: /personal/{user}/Documents/{path}
-        parts = path.split('/')
-        for i, part in enumerate(parts):
-            if part == 'personal' and i + 1 < len(parts):
-                site_path = f"/personal/{parts[i + 1]}"
-                remaining = '/'.join(parts[i + 2:])
-                for pattern in doc_lib_patterns:
-                    clean_pattern = pattern.strip('/')
-                    if remaining.startswith(clean_pattern):
-                        file_path = remaining[len(clean_pattern):].lstrip('/')
-                        break
-                break
+        match = re.search(r'(/personal/[^/]+)', path, re.IGNORECASE)
+        if match:
+            site_path = match.group(1)
+            remaining = path[match.end():].lstrip('/')
+            
+            for lib_name in doc_lib_names:
+                if remaining.lower().startswith(lib_name.lower()):
+                    file_path = remaining[len(lib_name):].lstrip('/')
+                    break
     else:
-        # Root site with document library
-        for pattern in doc_lib_patterns:
-            clean_pattern = pattern.strip('/')
-            if clean_pattern in path:
-                idx = path.find(clean_pattern)
-                file_path = path[idx + len(clean_pattern):].lstrip('/')
+        # Root site - check for document library in path
+        for lib_name in doc_lib_names:
+            # Look for the library name in the path
+            lib_pattern = f'/{lib_name}'
+            lib_lower = lib_pattern.lower()
+            path_lower = path.lower()
+            
+            if lib_lower in path_lower:
+                idx = path_lower.find(lib_lower)
+                # Get everything after the library name
+                file_path = path[idx + len(lib_pattern):].lstrip('/')
                 break
-    
-    # Handle Forms/AllItems.aspx view URLs - extract the folder path
-    if 'Forms/AllItems.aspx' in file_path:
-        file_path = file_path.replace('Forms/AllItems.aspx', '').rstrip('/')
     
     return {
         "hostname": hostname,
@@ -259,6 +281,11 @@ async def resolve_excel_file_ids(
     
     Args:
         url: The SharePoint or OneDrive URL pointing to a site or document library.
+             Supports multiple formats:
+             - Full path: https://{tenant}.sharepoint.com/Shared%20Documents/folder/file.xlsx
+             - Library view: https://{tenant}.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx
+             - Site root: https://{tenant}.sharepoint.com
+             - Site path: https://{tenant}.sharepoint.com/sites/{sitename}
         file_name: The name of the Excel file (with .xlsx extension).
     
     Returns:
@@ -268,15 +295,22 @@ async def resolve_excel_file_ids(
     try:
         headers = await get_graph_headers()
         
+        # Log the input for debugging
+        logger.info(f"Resolving Excel file - URL: '{url}', file_name: '{file_name}'")
+        
         # Parse the URL
         parsed = parse_sharepoint_url(url)
         hostname = parsed["hostname"]
         site_path = parsed["site_path"]
+        file_path = parsed.get("file_path", "")
+        
+        logger.debug(f"Parsed URL - hostname: {hostname}, site_path: {site_path}, file_path: {file_path}")
         
         if not hostname:
             return {
                 "status": "error",
-                "message": "Could not parse hostname from URL",
+                "message": f"Could not parse hostname from URL: '{url}'. Expected format: https://{{tenant}}.sharepoint.com/...",
+                "url_provided": url,
             }
         
         logger.info(f"Resolving URL - hostname: {hostname}, site_path: {site_path}, file_name: {file_name}")

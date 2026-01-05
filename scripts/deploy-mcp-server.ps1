@@ -215,10 +215,21 @@ if ($NoAuth) {
         $AzureClientSecret = $env:AZURE_CLIENT_SECRET
     }
 
-    # Try to load from config file
+    # Try to load from environment-specific config file first, then fall back to .env.local
+    $envFilePath = Join-Path $ProjectRoot "config\.env.$EnvironmentName"
     $envLocalPath = Join-Path $ProjectRoot "config\.env.local"
-    if (Test-Path $envLocalPath) {
-        $envContent = Get-Content $envLocalPath -Raw
+    
+    $configFilePath = $null
+    if (Test-Path $envFilePath) {
+        $configFilePath = $envFilePath
+        Write-Info "Loading credentials from: config\.env.$EnvironmentName"
+    } elseif (Test-Path $envLocalPath) {
+        $configFilePath = $envLocalPath
+        Write-Info "Loading credentials from: config\.env.local (fallback)"
+    }
+    
+    if ($configFilePath) {
+        $envContent = Get-Content $configFilePath -Raw
         if ([string]::IsNullOrEmpty($AzureClientId) -and $envContent -match 'AZURE_CLIENT_ID=(.+)') {
             $AzureClientId = $matches[1].Trim()
         }

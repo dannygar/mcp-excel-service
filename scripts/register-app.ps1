@@ -443,15 +443,17 @@ FOUNDRY_AUDIENCE=$appId
 # Server Configuration
 PORT=3000
 HOST=0.0.0.0
+
+# Local Development - Disable Entra auth for MCP Inspector testing
+# Remove or set to false when deploying to Azure
+DISABLE_ENTRA_AUTH=true
 "@
 
 $envContent | Out-File -FilePath $OutputEnvFile -Encoding UTF8
 Write-Success "Configuration saved to: $OutputEnvFile"
 
-# Also save to .env in mcp-server folder for convenience
-$mcpServerEnvPath = Join-Path $ProjectRoot "mcp-server\.env"
-$envContent | Out-File -FilePath $mcpServerEnvPath -Encoding UTF8
-Write-Success "Configuration also saved to: mcp-server\.env"
+# Note: Server now loads from config/.env.local automatically
+# No need to duplicate to mcp-server/.env
 
 # =============================================================================
 # Summary
@@ -489,9 +491,8 @@ if ($EnableFoundryAuth) {
     Write-Host ""
 }
 
-Write-Host "Configuration Files:" -ForegroundColor White
+Write-Host "Configuration File:" -ForegroundColor White
 Write-Host "  • $OutputEnvFile"
-Write-Host "  • mcp-server\.env"
 Write-Host ""
 
 Write-Host "Next Steps:" -ForegroundColor Yellow

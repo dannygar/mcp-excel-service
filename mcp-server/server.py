@@ -25,10 +25,47 @@ Security:
 import os
 import json
 import logging
+import pathlib
 from datetime import datetime
 
-import httpx
 from dotenv import load_dotenv
+
+# =============================================================================
+# Load environment variables FIRST (before any other imports that use env vars)
+# =============================================================================
+# Use MCP_ENV to select environment (default: 'local' for local development)
+# Priority: config/.env.{MCP_ENV} -> config/.env.local -> config/.env.dev -> mcp-server/.env (legacy)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mcp-excel-server")
+
+_project_root = pathlib.Path(__file__).parent.parent
+_mcp_env = os.getenv("MCP_ENV", "local")  # Default to 'local' for local development
+_env_file = _project_root / "config" / f".env.{_mcp_env}"
+_env_local = _project_root / "config" / ".env.local"
+_env_dev = _project_root / "config" / ".env.dev"
+_env_legacy = pathlib.Path(__file__).parent / ".env"
+
+if _env_file.exists():
+    load_dotenv(_env_file)
+    logger.info(f"Loaded config from {_env_file}")
+elif _env_local.exists():
+    load_dotenv(_env_local)
+    logger.info(f"Loaded config from {_env_local}")
+elif _env_dev.exists():
+    load_dotenv(_env_dev)
+    logger.info(f"Loaded config from {_env_dev}")
+elif _env_legacy.exists():
+    load_dotenv(_env_legacy)
+    logger.info(f"Loaded config from {_env_legacy} (legacy location)")
+else:
+    load_dotenv()  # Fall back to default behavior
+
+# =============================================================================
+# Now import modules that depend on environment variables
+# =============================================================================
+
+import httpx
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -64,13 +101,6 @@ from config import (
     TRADE_TRACKER_FILE,
     map_strategy_name,
 )
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mcp-excel-server")
-
-# Load environment variables
-load_dotenv()
 
 # Initialize MCP server
 mcp = FastMCP("MCP Excel Service")
