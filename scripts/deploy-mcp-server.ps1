@@ -76,9 +76,15 @@ param(
     [switch]$SkipFoundryIntegration
 )
 
-# Set default AzureEnvName based on EnvironmentName if not provided
+# Set AzureEnvName - prompt if not provided
 if ([string]::IsNullOrEmpty($AzureEnvName)) {
-    $AzureEnvName = "mcp-excel-$EnvironmentName"
+    $defaultEnvName = "mcp-excel-$EnvironmentName"
+    $userInput = Read-Host "Enter Azure environment name (press Enter for default '$defaultEnvName')"
+    if ([string]::IsNullOrWhiteSpace($userInput)) {
+        $AzureEnvName = $defaultEnvName
+    } else {
+        $AzureEnvName = $userInput.Trim()
+    }
 }
 
 $ErrorActionPreference = "Stop"
