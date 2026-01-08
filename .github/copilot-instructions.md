@@ -15,8 +15,8 @@
 - Python: 3.11+ (3.12 recommended). Uses `uv` for dependency management.
 - App Registration: Run `.\scripts\register-app.ps1` to create Entra ID app with Graph API permissions
 - Local MCP server (Container App):
-  - **Docker**: `docker build -t mcp-excel-server -f mcp-server/Dockerfile mcp-server/ && docker run -p 3000:3000 --env-file mcp-server/.env mcp-excel-server`
-  - **Direct Python**: `cd mcp-server && uv run python server.py` (uses .env file automatically)
+  - **Docker**: `docker build -t mcp-excel-server -f mcp-server/Dockerfile mcp-server/ && docker run -p 3000:3000 --env-file config/.env.local mcp-excel-server`
+  - **Direct Python**: `cd mcp-server && uv run python server.py` (uses config/.env.local automatically)
   - MCP endpoint: `http://localhost:3000/mcp`
   - Health endpoint: `http://localhost:3000/health`
   - Connect via MCP Inspector (`yarn inspector`) or VS Code Copilot agent mode
@@ -35,8 +35,11 @@
   - Azure: `az containerapp logs show --name <app-name> --resource-group <rg> --follow`
 
 ## Environment configuration
-- Production: Environment variables injected via Azure Container App secrets
-- Local development: Uses `.env` file in mcp-server folder (auto-created by register-app.ps1)
+- All environment files are in `config/` folder (no duplicates in mcp-server/)
+- Local development: Uses `config/.env.local` (MCP_ENV=local, default)
+- Azure dev deployment: Uses `config/.env.dev` (MCP_ENV=dev)
+- Azure prod deployment: Uses `config/.env.prod` (MCP_ENV=prod)
+- Environment is auto-created by `register-app.ps1` script
 
 ## Secrets and configuration
 - Required env vars:
@@ -44,7 +47,7 @@
   - `AZURE_CLIENT_ID` - App Registration client ID
   - `AZURE_CLIENT_SECRET` - App Registration client secret
 - In Azure: Stored as Container App secrets, referenced in container env vars
-- Locally: Set in `mcp-server/.env` file or environment variables
+- Locally: Set in `config/.env.local` file or environment variables
 
 ## Project conventions to follow
 - Use `logging` with `basicConfig(level=logging.INFO)` for server logs.

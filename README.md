@@ -6,7 +6,7 @@ Azure Container Apps-based MCP (Model Context Protocol) server providing Excel f
 
 - **Remote MCP server** using Azure Container Apps (FastMCP + Python 3.12)
 - **Streamable HTTP Transport** for Azure AI Foundry integration
-- **2 Excel manipulation tools** for updating cells and finding/updating rows
+- **4 Excel manipulation tools** for trade tracking and cell updates
 - **Data provider**: Microsoft Graph API (SharePoint/OneDrive)
 - **Authentication**: Azure AD service principal (client credentials flow)
 - **Auto-scaling**: 1-5 replicas based on HTTP load
@@ -41,7 +41,7 @@ uv sync
 docker build -t mcp-excel-server -f mcp-server/Dockerfile mcp-server/
 
 # Run with Azure AD credentials
-docker run -p 3000:3000 --env-file mcp-server/.env mcp-excel-server
+docker run -p 3000:3000 --env-file config/.env.local mcp-excel-server
 
 # Server available at http://localhost:3000/mcp
 ```
@@ -51,7 +51,7 @@ docker run -p 3000:3000 --env-file mcp-server/.env mcp-excel-server
 ```pwsh
 cd mcp-server
 
-# Ensure .env file exists with Azure AD credentials (created by register-app.ps1)
+# Ensure config/.env.local exists with Azure AD credentials (created by register-app.ps1)
 # Or set environment variables manually:
 $env:AZURE_TENANT_ID = "your-tenant-id"
 $env:AZURE_CLIENT_ID = "your-client-id"
@@ -74,7 +74,7 @@ yarn inspector
 ```
 
 The inspector opens at `http://localhost:5173` where you can:
-- Browse available tools (`excel.updateRowByLookup`, `excel.updateRange`)
+- Browse available tools (`excel.updateTradeWithDelta`, `excel.closeTrade`, `excel.updateRange`, `excel.logTrades`)
 - Test tool invocations with custom parameters
 - View request/response payloads in real-time
 
@@ -195,37 +195,45 @@ Add to your `.vscode/mcp.json`:
 
 ## MCP Tools
 
-Both tools accept a single JSON object as input, making them fully compatible with Foundry Agent schema validation.
+All tools accept explicit parameters for the Excel workbook location, making them fully compatible with Foundry Agent schema validation and supporting multi-workbook scenarios.
 
-### `excel.updateRowByLookup`
+### `excel.updateTradeWithDelta`
 
-Find a row by looking up a reference value in a column and update specific cells in that row (or a relative row).
+Update delta values for a trade in an Excel trade tracker spreadsheet. Finds a trade by matching date and time, then updates the appropriate delta column based on the time window and strike type.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `url` | string | ✓ | SharePoint/OneDrive URL to document library |
-| `file_name` | string | ✓ | Excel file name with .xlsx extension |
-| `sheet_name` | string | ✓ | Worksheet name |
-| `search_column` | string | ✓ | Column letter to search (e.g., "A", "C") |
-| `reference_value` | string | ✓ | Value to find (supports dates like "12/22/2025") |
-| `target_columns` | string | ✓ | **JSON array** of column letters (e.g., `'["D", "F", "H"]'`) |
-| `values` | string | ✓ | **JSON array** of values to write (e.g., `'["value1", 123, true]'`) |
-| `row_offset` | integer | | Rows below found row to update (default: 0) |
+| `url` | string | ✓ | SharePoint/OneDrive URL to document library (e.g., `https://contoso.sharepoint.com/Shared%20Documents`) |
+| `file_name` | string | ✓ | Excel workbook name with .xlsx extension (e.g., `2026 Trade Tracker.xlsx`) |
+| `sheet_name` | string | ✓ | Worksheet name (e.g., "January", "February") |
+| `trade_date` | string | ✓ | Date when the trade was opened (e.g., "1/6/2026") |
+| `trade_time` | string | ✓ | Time when the trade was opened (e.g., "10:30 AM") |
+| `sold_strike` | string | ✓ | Strike with type prefix: "P 6855" (Put) or "C 6960" (Call) |
+| `delta` | number | ✓ | The delta value to record (e.g., 0.15, -0.08) |
+| `delta_time` | string | ✓ | Time when delta was obtained in EST (e.g., "10:45 AM") |
 
-> **Note**: `target_columns` and `values` must be valid JSON strings. This ensures compatibility with all MCP clients including Azure AI Foundry.
+**Time Windows & Column Mapping:**
+| Time Window | Sold Calls | Sold Puts |
+|-------------|------------|----------|
+| 9:30 AM - 11:00 AM | Column U | Column V |
+| 11:00 AM - 12:00 PM | Column W | Column X |
+| 1:00 PM - 2:00 PM | Column Y | Column Z |
+| 2:30 PM - 3:30 PM | Column AA | Column AB |
+
+> **Note**: If `delta_time` doesn't fall within any accepted time window, the tool returns an error.
 
 **Example Request:**
 ```json
 {
-  "url": "https://contoso.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx",
-  "file_name": "2025 Trade Tracker.xlsx",
-  "sheet_name": "December",
-  "search_column": "C",
-  "reference_value": "12/23/2025",
-  "target_columns": "[\"C\", \"E\", \"I\", \"J\", \"L\"]",
-  "values": "[\"12/23/2025\", \"11:36 AM\", \"VPCS\", 0.25, 25]",
-  "row_offset": 1
+  "url": "https://contoso.sharepoint.com/Shared%20Documents",
+  "file_name": "2026 Trade Tracker.xlsx",
+  "sheet_name": "January",
+  "trade_date": "1/6/2026",
+  "trade_time": "10:30 AM",
+  "sold_strike": "P 6855",
+  "delta": 0.12,
+  "delta_time": "10:45 AM"
 }
 ```
 
@@ -233,12 +241,71 @@ Find a row by looking up a reference value in a column and update specific cells
 ```json
 {
   "status": "success",
-  "message": "Successfully updated 5 cells in row 15",
-  "sheet_name": "December",
-  "found_row": 14,
-  "target_row": 15,
-  "row_offset": 1,
-  "updated_cells": ["C15", "E15", "I15", "J15", "L15"]
+  "message": "Successfully updated Put delta for trade at row 15",
+  "sheet_name": "January",
+  "trade_date": "1/6/2026",
+  "trade_time": "10:30 AM",
+  "sold_strike": "P 6855",
+  "strike_type": "Put",
+  "strike_price": "6855",
+  "delta": 0.12,
+  "delta_time": "10:45 AM",
+  "time_window": "9:30-11:00",
+  "updated_cell": "V15",
+  "found_row": 15
+}
+```
+
+---
+
+### `excel.closeTrade`
+
+Close a trade by updating the close date and close time in the trade tracker spreadsheet. Finds the trade row by matching the trade date (Column C) and trade time (Column E).
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | ✓ | SharePoint/OneDrive URL to document library (e.g., `https://contoso.sharepoint.com/Shared%20Documents`) |
+| `file_name` | string | ✓ | Excel workbook name with .xlsx extension (e.g., `2026 Trade Tracker.xlsx`) |
+| `sheet_name` | string | ✓ | Worksheet name (e.g., "January", "February") |
+| `trade_date` | string | ✓ | Date when the trade was opened (e.g., "1/6/2026") |
+| `trade_time` | string | ✓ | Time when the trade was opened (e.g., "10:30 AM") |
+| `close_date` | string | ✓ | Date when the trade was closed (e.g., "1/6/2026") |
+| `close_time` | string | ✓ | Time when the trade was closed (e.g., "4:00 PM") |
+
+**Column Mapping:**
+| Column | Purpose |
+|--------|--------|
+| C | Trade open date (search) |
+| E | Trade open time (search) |
+| F | Trade close date (update) |
+| G | Trade close time (update) |
+
+**Example Request:**
+```json
+{
+  "url": "https://contoso.sharepoint.com/Shared%20Documents",
+  "file_name": "2026 Trade Tracker.xlsx",
+  "sheet_name": "January",
+  "trade_date": "1/6/2026",
+  "trade_time": "10:30 AM",
+  "close_date": "1/6/2026",
+  "close_time": "2:30 PM"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Successfully closed trade at row 15",
+  "sheet_name": "January",
+  "trade_date": "1/6/2026",
+  "trade_time": "10:30 AM",
+  "close_date": "1/6/2026",
+  "close_time": "2:30 PM",
+  "updated_cells": ["F15", "G15"],
+  "found_row": 15
 }
 ```
 
@@ -287,28 +354,21 @@ Update a range of cells in an Excel worksheet with a 2D array of values.
 
 ### `excel.logTrades`
 
-**High-level tool** for logging multiple trades to a pre-configured trade tracker spreadsheet. The spreadsheet URL and file name are configured via environment variables, simplifying agent prompts.
-
-**Environment Variables (required):**
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `TRADE_TRACKER_URL` | SharePoint/OneDrive URL | `https://contoso.sharepoint.com/Shared%20Documents/Forms/AllItems.aspx` |
-| `TRADE_TRACKER_FILE` | Excel workbook filename | `2025 Trade Tracker.xlsx` |
+**High-level tool** for logging multiple trades to a trade tracker spreadsheet. Automatically finds the last row with a valid date in column C and appends trade data starting from the next row.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `url` | string | ✓ | SharePoint/OneDrive URL to document library (e.g., `https://contoso.sharepoint.com/Shared%20Documents`) |
+| `file_name` | string | ✓ | Excel workbook name with .xlsx extension (e.g., `2026 Trade Tracker.xlsx`) |
+| `sheet_name` | string | ✓ | Worksheet name (e.g., "January", "February") |
 | `trades` | string | ✓ | **JSON array** of trade objects (see below) |
-| `reference_date` | string | | Date to search for in column C (default: last date in column C) |
-| `sheet_name` | string | | Worksheet name (default: current month, e.g., "December") |
 
 **Trade Object Fields:**
 | Field | Column | Type | Description |
 |-------|--------|------|-------------|
 | `open_date` | C | string | Date when trade was opened (e.g., "12/23/2025") |
 | `open_time` | E | string | Time when trade was opened (e.g., "10:30 AM") |
-| `close_date` | F | string | Date when trade was closed, if known |
-| `close_time` | G | string | Time when trade was closed (e.g., "4:00 PM") |
 | `strategy` | I | string | Strategy name (e.g., "VPCS", "VCCS", "IC") |
 | `credit` | J | number | Credit received when opening |
 | `debit` | K | number | Debit paid if closed before expiration |
@@ -318,22 +378,18 @@ Update a range of cells in an Excel worksheet with a 2D array of values.
 | `sold_call_strike` | Q | number | Strike price for sold calls |
 | `sold_put_strike` | R | number | Strike price for sold puts |
 | `width` | T | number | Width in USD between sold and bought strikes |
-| `expired` | - | boolean | If `true`, auto-fills close_date=open_date, close_time="4:00 PM", debit=0 |
 
 > **Note**: For backward compatibility, `date` and `time` are aliases for `open_date` and `open_time`, and `fees` is an alias for `open_fees`.
+> 
+> **Important**: This tool does NOT set close_date or close_time. Use the `excel.closeTrade` tool to close trades with date/time.
 
-**Expired Trade Handling:**
-For 0DTE SPX options that expire worthless, set `"expired": true` in the trade object. The tool will automatically populate:
-- `close_date` = `open_date` (same-day expiration)
-- `close_time` = "4:00 PM" (market close)
-- `debit` = 0 (expired worthless)
-
-**Example Request (with expired trades):**
+**Example Request:**
 ```json
 {
-  "trades": "[{\"open_date\": \"12/23/2025\", \"open_time\": \"10:42 AM\", \"strategy\": \"VCCS\", \"credit\": 0.10, \"contracts\": 25, \"open_fees\": 88.27, \"sold_call_strike\": 6920, \"width\": 15, \"expired\": true}, {\"open_date\": \"12/23/2025\", \"open_time\": \"11:36 AM\", \"strategy\": \"VPCS\", \"credit\": 0.25, \"contracts\": 25, \"open_fees\": 88.27, \"sold_put_strike\": 6860, \"width\": 15, \"expired\": true}]",
-  "reference_date": "12/22/2025",
-  "sheet_name": "December"
+  "url": "https://contoso.sharepoint.com/Shared%20Documents",
+  "file_name": "2026 Trade Tracker.xlsx",
+  "sheet_name": "January",
+  "trades": "[{\"open_date\": \"1/6/2026\", \"open_time\": \"10:42 AM\", \"strategy\": \"VCCS\", \"credit\": 0.10, \"contracts\": 25, \"open_fees\": 88.27, \"sold_call_strike\": 6920, \"width\": 15}, {\"open_date\": \"1/6/2026\", \"open_time\": \"11:36 AM\", \"strategy\": \"VPCS\", \"credit\": 0.25, \"contracts\": 25, \"open_fees\": 88.27, \"sold_put_strike\": 6860, \"width\": 15}]"
 }
 ```
 
@@ -343,35 +399,28 @@ For 0DTE SPX options that expire worthless, set `"expired": true` in the trade o
   "status": "success",
   "message": "Successfully logged 2 trades",
   "trades_logged": 2,
-  "file_name": "2025 Trade Tracker.xlsx",
-  "sheet_name": "December",
-  "reference_date": "12/22/2025",
+  "file_name": "2026 Trade Tracker.xlsx",
+  "sheet_name": "January",
   "results": [
     {
       "trade_index": 1,
       "row": 15,
-      "open_date": "12/23/2025",
+      "open_date": "1/6/2026",
       "open_time": "10:42 AM",
-      "close_date": "12/23/2025",
-      "close_time": "4:00 PM",
       "strategy": "VCCS",
       "credit": 0.10,
-      "debit": 0,
-      "contracts": 25,
-      "expired": true
+      "debit": null,
+      "contracts": 25
     },
     {
       "trade_index": 2,
       "row": 16,
-      "open_date": "12/23/2025",
+      "open_date": "1/6/2026",
       "open_time": "11:36 AM",
-      "close_date": "12/23/2025",
-      "close_time": "4:00 PM",
       "strategy": "VPCS",
       "credit": 0.25,
-      "debit": 0,
-      "contracts": 25,
-      "expired": true
+      "debit": null,
+      "contracts": 25
     }
   ]
 }
@@ -379,7 +428,9 @@ For 0DTE SPX options that expire worthless, set `"expired": true` in the trade o
 
 **Simplified Foundry Agent Prompt:**
 ```
-Show me all SPX trades from today that expired, then log them to my trade tracker.
+Show me all SPX trades from today, then log them to my trade tracker at
+https://contoso.sharepoint.com/Shared%20Documents/2026 Trade Tracker.xlsx in the January sheet.
+After logging, use excel.closeTrade to close any trades that expired.
 ```
 
 ---
@@ -401,7 +452,7 @@ The MCP server automatically resolves various SharePoint/OneDrive URL formats:
 ```
 ├── mcp-server/
 │   ├── server.py              # MCP server (FastMCP + Streamable HTTP)
-│   ├── config.py              # Configuration (strategy mapping, trade tracker URL)
+│   ├── config.py              # Configuration (strategy mapping)
 │   ├── Dockerfile             # Container image definition
 │   ├── requirements.txt       # Python dependencies
 │   └── pyproject.toml         # Project metadata
@@ -432,8 +483,6 @@ The MCP server automatically resolves various SharePoint/OneDrive URL formats:
 | `AZURE_TENANT_ID` | Yes | Azure AD tenant ID |
 | `AZURE_CLIENT_ID` | Yes | App Registration client ID |
 | `AZURE_CLIENT_SECRET` | Yes | App Registration client secret |
-| `TRADE_TRACKER_URL` | For logTrades | SharePoint/OneDrive URL for trade tracker |
-| `TRADE_TRACKER_FILE` | For logTrades | Excel filename for trade tracker |
 | `PORT` | No | Server port (default: 3000) |
 | `HOST` | No | Server host (default: 0.0.0.0) |
 

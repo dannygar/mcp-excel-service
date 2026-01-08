@@ -44,11 +44,9 @@ For Azure Container Apps deployment, the `deploy-mcp-server.ps1` script will:
 
 The server uses `MCP_ENV` environment variable to select the config file (defaults to `local`):
 
-1. `config/.env.{MCP_ENV}` - Environment-specific config (e.g., `.env.dev`, `.env.prod`)
+1. `config/.env.{MCP_ENV}` - Environment-specific config (e.g., `.env.local`, `.env.dev`, `.env.prod`)
 2. `config/.env.local` - Local development fallback
-3. `config/.env.dev` - Dev environment fallback
-4. `mcp-server/.env` - Legacy location (deprecated)
-5. Environment variables - Container Apps secrets / OS environment
+3. Environment variables - Container Apps secrets / OS environment
 
 ### Setting MCP_ENV
 

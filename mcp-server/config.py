@@ -1,45 +1,31 @@
 """
 Configuration module for MCP Excel Service.
 
-Contains trade tracker settings and strategy name mappings.
+Contains strategy name mappings and environment loading.
 """
 
 import os
 import pathlib
 from dotenv import load_dotenv
 
-# Load environment variables from centralized config folder
-# Use MCP_ENV to select environment (default: 'local' for local development)
-# Priority: config/.env.{MCP_ENV} -> config/.env.local -> config/.env.dev -> mcp-server/.env (legacy)
+# Load environment variables from config folder
+# Use MCP_ENV to select environment:
+#   - "local" (default): Uses config/.env.local for local development
+#   - "dev": Uses config/.env.dev for Azure dev deployment
+#   - "prod": Uses config/.env.prod for Azure production deployment
 _project_root = pathlib.Path(__file__).parent.parent
 _mcp_env = os.getenv("MCP_ENV", "local")  # Default to 'local' for local development
 _env_file = _project_root / "config" / f".env.{_mcp_env}"
-_env_local = _project_root / "config" / ".env.local"
-_env_dev = _project_root / "config" / ".env.dev"
-_env_legacy = pathlib.Path(__file__).parent / ".env"
 
 if _env_file.exists():
     load_dotenv(_env_file)
-elif _env_local.exists():
-    load_dotenv(_env_local)
-elif _env_dev.exists():
-    load_dotenv(_env_dev)
-elif _env_legacy.exists():
-    load_dotenv(_env_legacy)
 else:
-    load_dotenv()  # Fall back to default behavior
-
-# =============================================================================
-# Trade Tracker Configuration (from environment variables)
-# =============================================================================
-TRADE_TRACKER_URL = os.getenv(
-    "TRADE_TRACKER_URL",
-    "https://mngenvmcap046191.sharepoint.com/Shared%20Documents"
-)
-TRADE_TRACKER_FILE = os.getenv(
-    "TRADE_TRACKER_FILE",
-    "2026 GY Capital Group LLC Trade Tracker.xlsx"
-)
+    # Fallback to .env.local if specified env doesn't exist
+    _env_local = _project_root / "config" / ".env.local"
+    if _env_local.exists():
+        load_dotenv(_env_local)
+    else:
+        load_dotenv()  # Fall back to default behavior
 
 # =============================================================================
 # Strategy Name Mapping (Full Name → Excel Short Code)
