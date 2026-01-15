@@ -3,10 +3,19 @@
 ## Big picture
 - Purpose: Azure Container Apps-based MCP (Model Context Protocol) server providing Excel file manipulation capabilities for AI agents.
 - Architecture: Remote MCP server using Azure Container Apps with FastMCP (Python 3.12+), deployed via Azure Developer CLI (azd).
+- **Dual Protocol Support**: MCP (Streamable HTTP) for AI agents + REST API (OpenAPI) for direct HTTP clients
 - Key modules:
-  - `mcp-server/server.py`: MCP server with 2 Excel tools:
-    - excel.appendRows: Append rows to an Excel table in SharePoint/OneDrive
+  - `mcp-server/server.py`: MCP server with 4 Excel tools:
     - excel.updateRange: Update a range of cells in an Excel worksheet
+    - excel.logTrades: Log multiple trades to an Excel workbook
+    - excel.updateTradeWithDelta: Update delta value for a trade
+    - excel.closeTrade: Close a trade by updating close date/time
+- REST API endpoints (same functionality as MCP tools):
+  - POST /api/v1/updateRange
+  - POST /api/v1/logTrades
+  - POST /api/v1/updateTradeWithDelta
+  - POST /api/v1/closeTrade
+  - GET /api/v1/openapi.json (OpenAPI specification)
 - Config/secrets: Azure AD credentials stored as Container App secrets and injected via environment variables
 - Required credentials: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (service principal)
 - Infrastructure: `infra/mcp-server/main.bicep` defines Azure resources (Container App, Container Registry, Log Analytics); `azure.yaml` configures azd deployment.
@@ -18,12 +27,17 @@
   - **Docker**: `docker build -t mcp-excel-server -f mcp-server/Dockerfile mcp-server/ && docker run -p 3000:3000 --env-file config/.env.local mcp-excel-server`
   - **Direct Python**: `cd mcp-server && uv run python server.py` (uses config/.env.local automatically)
   - MCP endpoint: `http://localhost:3000/mcp`
+  - REST API: `http://localhost:3000/api/v1/*`
+  - OpenAPI spec: `http://localhost:3000/api/v1/openapi.json`
   - Health endpoint: `http://localhost:3000/health`
   - Connect via MCP Inspector (`yarn inspector`) or VS Code Copilot agent mode
 - MCP Inspector testing:
   - Install: `yarn install`
   - Launch inspector: `yarn inspector` (opens web UI at http://localhost:5173)
   - Test tools interactively with custom parameters and view request/response payloads
+- REST API testing:
+  - Use curl, Postman, or any HTTP client
+  - Example: `curl -X POST http://localhost:3000/api/v1/logTrades -H "Content-Type: application/json" -d '{"url": "...", "file_name": "...", "sheet_name": "...", "trades": "..."}'`
 - Deploy to Azure:
   - First time: `.\scripts\deploy-mcp-server.ps1` (creates App Registration + deploys)
   - With existing credentials: `azd up`
@@ -53,8 +67,10 @@
 - Use `logging` with `basicConfig(level=logging.INFO)` for server logs.
 - Keep secrets out of code; access via environment variables only.
 - Use FastMCP decorators (`@mcp.tool()`) for tool definitions.
+- Use FastMCP decorators (`@mcp.custom_route()`) for REST API endpoints.
 - Return JSON strings from tools for consistent parsing.
 - Use async/await for all Graph API calls.
+- REST API endpoints should call the same underlying implementation as MCP tools.
 
 ## Typical task templates (examples)
 - Add a new tool to `mcp-server/server.py`:
@@ -64,7 +80,8 @@
   4) Get headers via `headers = await get_graph_headers()`
   5) Make API calls with try-except error handling
   6) Return result as JSON string using `json.dumps()`
-- Example: Adding a new Excel tool:
+  7) Add corresponding REST API endpoint using `@mcp.custom_route()`
+- Example: Adding a new Excel tool with REST API:
   ```python
   @mcp.tool(name="excel.getRange")
   async def excel_get_range(drive_id: str, item_id: str, sheet_name: str, address: str) -> str:

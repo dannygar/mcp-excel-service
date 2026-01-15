@@ -5,10 +5,10 @@ Azure Container Apps-based MCP (Model Context Protocol) server providing Excel f
 ## Architecture
 
 - **Remote MCP server** using Azure Container Apps (FastMCP + Python 3.12)
-- **Streamable HTTP Transport** for Azure AI Foundry integration
+- **Dual Protocol Support**: MCP (Streamable HTTP) + REST API (OpenAPI)
 - **4 Excel manipulation tools** for trade tracking and cell updates
 - **Data provider**: Microsoft Graph API (SharePoint/OneDrive)
-- **Authentication**: Azure AD service principal (client credentials flow)
+- **Authentication**: Azure AD service principal (client credentials flow) + Entra ID token validation
 - **Auto-scaling**: 1-5 replicas based on HTTP load
 - **Deployed via Azure Developer CLI** (`azd`)
 
@@ -432,6 +432,95 @@ Show me all SPX trades from today, then log them to my trade tracker at
 https://contoso.sharepoint.com/Shared%20Documents/2026 Trade Tracker.xlsx in the January sheet.
 After logging, use excel.closeTrade to close any trades that expired.
 ```
+
+---
+
+## REST API (OpenAPI)
+
+The MCP server also exposes REST API endpoints for direct HTTP access without MCP protocol overhead. This is faster and simpler for direct integrations.
+
+### Server Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `https://<fqdn>/mcp` | MCP protocol endpoint (Streamable HTTP) |
+| `https://<fqdn>/api/v1/*` | REST API endpoints (OpenAPI) |
+| `https://<fqdn>/api/v1/openapi.json` | OpenAPI 3.0 specification |
+| `https://<fqdn>/health` | Health check (public, no auth required) |
+
+### REST Endpoints
+
+| Method | Endpoint | Description | Equivalent MCP Tool |
+|--------|----------|-------------|---------------------|
+| POST | `/api/v1/updateRange` | Update a range of cells | `excel.updateRange` |
+| POST | `/api/v1/logTrades` | Log multiple trades | `excel.logTrades` |
+| POST | `/api/v1/updateTradeWithDelta` | Update delta for a trade | `excel.updateTradeWithDelta` |
+| POST | `/api/v1/closeTrade` | Close a trade | `excel.closeTrade` |
+| GET | `/api/v1/openapi.json` | OpenAPI 3.0 specification | - |
+
+### Example: Log Trades via REST API
+
+```bash
+curl -X POST https://<fqdn>/api/v1/logTrades \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-token>" \
+  -d '{
+    "url": "https://contoso.sharepoint.com/Shared%20Documents",
+    "file_name": "2026 Trade Tracker.xlsx",
+    "sheet_name": "January",
+    "trades": "[{\"open_date\": \"01/06/2026\", \"strategy\": \"VPCS\", \"credit\": 0.30}]"
+  }'
+```
+
+### Example: Update Delta via REST API
+
+```bash
+curl -X POST https://<fqdn>/api/v1/updateTradeWithDelta \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-token>" \
+  -d '{
+    "url": "https://contoso.sharepoint.com/Shared%20Documents",
+    "file_name": "2026 Trade Tracker.xlsx",
+    "sheet_name": "January",
+    "trade_date": "1/6/2026",
+    "trade_time": "10:30 AM",
+    "sold_strike": "P 6855",
+    "delta": 0.12,
+    "delta_time": "10:45 AM"
+  }'
+```
+
+### Example: Close Trade via REST API
+
+```bash
+curl -X POST https://<fqdn>/api/v1/closeTrade \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-token>" \
+  -d '{
+    "url": "https://contoso.sharepoint.com/Shared%20Documents",
+    "file_name": "2026 Trade Tracker.xlsx",
+    "sheet_name": "January",
+    "trade_date": "1/6/2026",
+    "trade_time": "10:30 AM",
+    "close_date": "1/6/2026",
+    "close_time": "4:00 PM"
+  }'
+```
+
+### OpenAPI Specification
+
+View the full API specification at `/api/v1/openapi.json` or use Swagger UI tools to explore the API.
+
+### REST vs MCP Protocol
+
+| Feature | REST API | MCP Protocol |
+|---------|----------|--------------|
+| Speed | Faster (single HTTP call) | Slower (session init + tool call) |
+| Simplicity | Standard REST/JSON | Requires MCP client |
+| Streaming | No | Yes (SSE for large responses) |
+| AI Agent Integration | Manual | Native (Foundry, VS Code Copilot) |
+
+**Recommendation**: Use REST API for direct integrations and automation scripts. Use MCP protocol for AI agent integrations.
 
 ---
 

@@ -1,0 +1,6 @@
+.\scripts\deploy-mcp-server.ps1 -AzureEnvironment excel-mcp-dev{
+  "url": "https://mngenvmcap046191.sharepoint.com/",
+  "file_name": "2026 GY Capital Group LLC Trade Tracker.xlsx",
+  "sheet_name": "January",
+  "trades": "[{\"open_date\": \"01/12/2026\", \"open_time\": \"10:30 AM\", \"strategy\": \"VPCS\", \"credit\": 0.25, \"contracts\": 25, \"open_fees\": 88.78, \"sold_put_strike\": 5890, \"width\": 15}]"
+}

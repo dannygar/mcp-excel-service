@@ -1,33 +1,33 @@
 """
-Microsoft Entra ID Authentication Module
+Microsoft Entra ID Token Validation for MCP Server
 
-Provides token validation and middleware for authenticating incoming requests
-from Azure AI Foundry agents using Project Managed Identity.
+This module provides JWT token validation for Microsoft Entra ID (Azure AD)
+authentication. It validates bearer tokens sent by AI Foundry agents using
+the Project Managed Identity or Agent Identity.
 
-Authentication Flow:
-    1. Extract bearer token from Authorization header
-    2. Decode JWT to get claims (kid, issuer, audience, expiration)
-    3. Fetch JWKS keys from Microsoft Entra ID
-    4. Validate token signature using PyJWT
-    5. Verify issuer matches configured tenant
-    6. Verify audience matches configured client ID
+Usage:
+    from auth import EntraTokenValidator, EntraAuthMiddleware, create_validator_from_env
+    
+    validator = create_validator_from_env()
+    if validator:
+        app_with_auth = EntraAuthMiddleware(app, validator=validator)
 """
 
 import os
-import json
 import logging
-import time
-from typing import Optional
+from typing import Optional, Dict, Any, Callable
+from functools import wraps
 
-import httpx
+import jwt
+from jwt import PyJWKClient, PyJWKClientError
+from jwt.exceptions import InvalidTokenError, ExpiredSignatureError, InvalidAudienceError, InvalidIssuerError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
-logger = logging.getLogger("mcp-excel-server")
+logger = logging.getLogger("entra-auth")
 
 # =============================================================================
-# Configuration
+# Configuration (read from environment)
 # =============================================================================
 
 # Get configuration for incoming token validation
@@ -41,248 +41,317 @@ _auth_explicitly_disabled = os.getenv("DISABLE_ENTRA_AUTH", "").lower() in ("tru
 _has_entra_config = bool(ENTRA_TENANT_ID and ENTRA_CLIENT_ID)
 ENTRA_AUTH_ENABLED = _has_entra_config and not _auth_explicitly_disabled
 
-# OIDC/JWT validation settings
-ENTRA_ISSUER_V1 = f"https://sts.windows.net/{ENTRA_TENANT_ID}/"
-ENTRA_ISSUER_V2 = f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/v2.0"
-ENTRA_JWKS_URI = f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/discovery/v2.0/keys"
-
-# Cache for JWKS keys
-_jwks_cache = {
-    "keys": None,
-    "fetched_at": 0,
-    "cache_duration": 3600,  # Refresh keys every hour
-}
-
 
 # =============================================================================
-# Token Validation Functions
+# Token Validator Class
 # =============================================================================
 
-async def get_jwks_keys() -> dict:
+class EntraTokenValidator:
     """
-    Fetch and cache the JSON Web Key Set (JWKS) from Microsoft Entra ID.
-    Used for validating JWT token signatures.
+    Validates Microsoft Entra ID JWT tokens for Azure AI Foundry integration.
+    
+    This validator:
+    - Fetches and caches JWKS (JSON Web Key Sets) from Microsoft
+    - Validates token signature, audience, issuer, and expiration
+    - Supports both v1.0 and v2.0 token endpoints
     """
-    global _jwks_cache
     
-    current_time = time.time()
-    if _jwks_cache["keys"] and current_time < _jwks_cache["fetched_at"] + _jwks_cache["cache_duration"]:
-        return _jwks_cache["keys"]
-    
-    logger.info(f"Fetching JWKS from {ENTRA_JWKS_URI}")
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(ENTRA_JWKS_URI, timeout=30.0)
-        if response.status_code == 200:
-            _jwks_cache["keys"] = response.json()
-            _jwks_cache["fetched_at"] = current_time
-            logger.info("Successfully fetched and cached JWKS keys")
-            return _jwks_cache["keys"]
-        else:
-            logger.error(f"Failed to fetch JWKS: {response.status_code}")
-            raise ValueError(f"Failed to fetch JWKS: {response.status_code}")
-
-
-def decode_jwt_without_verification(token: str) -> dict:
-    """
-    Decode a JWT token without verification to extract header and claims.
-    Used to get the key ID (kid) for signature verification.
-    """
-    import base64
-    
-    parts = token.split('.')
-    if len(parts) != 3:
-        raise ValueError("Invalid JWT format")
-    
-    def decode_part(part: str) -> dict:
-        # Add padding if needed
-        padding = 4 - len(part) % 4
-        if padding != 4:
-            part += '=' * padding
-        decoded = base64.urlsafe_b64decode(part)
-        return json.loads(decoded)
-    
-    header = decode_part(parts[0])
-    payload = decode_part(parts[1])
-    
-    return {"header": header, "payload": payload}
-
-
-async def validate_entra_token(token: str) -> dict:
-    """
-    Validate a Microsoft Entra ID bearer token.
-    
-    Validates:
-    - Token signature using JWKS
-    - Token expiration
-    - Token issuer (must be from configured tenant)
-    - Token audience (must match AZURE_CLIENT_ID)
-    
-    Returns:
-        Token claims if valid
+    def __init__(
+        self,
+        tenant_id: str,
+        client_id: str,
+        allowed_audiences: Optional[list] = None,
+        cache_ttl: int = 3600
+    ):
+        """
+        Initialize the token validator.
         
-    Raises:
-        ValueError: If token is invalid
-    """
-    try:
-        # Decode token to get claims (without signature verification first)
-        decoded = decode_jwt_without_verification(token)
-        header = decoded["header"]
-        claims = decoded["payload"]
+        Args:
+            tenant_id: Microsoft Entra tenant ID
+            client_id: Application (client) ID of the app registration
+            allowed_audiences: List of allowed audience values (defaults to client_id and api://{client_id})
+            cache_ttl: Time in seconds to cache JWKS (default: 1 hour)
+        """
+        self.tenant_id = tenant_id
+        self.client_id = client_id
+        self.allowed_audiences = allowed_audiences or [
+            client_id,
+            f"api://{client_id}"
+        ]
+        self.cache_ttl = cache_ttl
         
-        # Validate basic structure
-        if "alg" not in header or "kid" not in header:
-            raise ValueError("Invalid token header")
+        # JWKS endpoint for Microsoft Entra ID
+        self.jwks_uri = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
         
-        # Get current time for expiration check
-        current_time = int(time.time())
+        # Valid issuers - support both v1.0 and v2.0 tokens
+        self.issuer_v2 = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+        self.issuer_v1 = f"https://sts.windows.net/{tenant_id}/"
         
-        # Validate expiration
-        exp = claims.get("exp", 0)
-        if current_time >= exp:
-            raise ValueError("Token has expired")
+        # Initialize PyJWKClient with caching
+        self._jwks_client = PyJWKClient(
+            self.jwks_uri,
+            cache_jwk_set=True,
+            lifespan=cache_ttl
+        )
+    
+    async def validate_token(self, token: str) -> tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        """
+        Validate a JWT token from Microsoft Entra ID.
         
-        # Validate not before (if present)
-        nbf = claims.get("nbf", 0)
-        if current_time < nbf:
-            raise ValueError("Token is not yet valid")
-        
-        # Validate issuer - accept both v1 and v2 endpoints
-        issuer = claims.get("iss", "")
-        if issuer not in [ENTRA_ISSUER_V1, ENTRA_ISSUER_V2]:
-            logger.warning(f"Invalid issuer: {issuer}. Expected: {ENTRA_ISSUER_V1} or {ENTRA_ISSUER_V2}")
-            raise ValueError(f"Invalid token issuer: {issuer}")
-        
-        # Validate audience - must match our client ID
-        aud = claims.get("aud", "")
-        # Audience can be the client ID or the Application ID URI (api://<client-id>)
-        valid_audiences = [ENTRA_CLIENT_ID, f"api://{ENTRA_CLIENT_ID}"]
-        if aud not in valid_audiences:
-            logger.warning(f"Invalid audience: {aud}. Expected one of: {valid_audiences}")
-            raise ValueError(f"Invalid token audience: {aud}")
-        
-        # For production, verify signature with JWKS
-        # This requires the cryptography and PyJWT libraries
+        Args:
+            token: The JWT bearer token (without 'Bearer ' prefix)
+            
+        Returns:
+            Tuple of (is_valid, claims, error_message)
+        """
         try:
-            import jwt
-            from jwt import PyJWKClient
+            # Log token info for debugging (without exposing sensitive data)
+            try:
+                unverified_claims = jwt.decode(token, options={"verify_signature": False})
+                logger.info(f"Token audience (aud): {unverified_claims.get('aud')}")
+                logger.info(f"Token issuer (iss): {unverified_claims.get('iss')}")
+                logger.info(f"Token app id (appid/azp): {unverified_claims.get('appid') or unverified_claims.get('azp')}")
+                logger.info(f"Allowed audiences: {self.allowed_audiences}")
+            except Exception as e:
+                logger.warning(f"Could not decode unverified claims: {e}")
             
-            jwks_client = PyJWKClient(ENTRA_JWKS_URI)
-            signing_key = jwks_client.get_signing_key_from_jwt(token)
+            # Get the signing key from JWKS using PyJWKClient
+            try:
+                signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+                logger.info(f"Successfully retrieved signing key")
+            except PyJWKClientError as e:
+                logger.error(f"Failed to get signing key from JWKS: {e}")
+                return False, None, f"Unable to find signing key for token: {e}"
+            except Exception as e:
+                logger.error(f"Unexpected error getting signing key: {e}")
+                return False, None, f"Error retrieving signing key: {e}"
             
-            # Verify the token with proper signature validation
-            verified_claims = jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["RS256"],
-                audience=valid_audiences,
-                issuer=[ENTRA_ISSUER_V1, ENTRA_ISSUER_V2],
-                options={"verify_exp": True, "verify_nbf": True}
-            )
+            # Try v1.0 issuer first (common for managed identities), then v2.0
+            claims = None
+            last_error = None
             
-            logger.info(f"Token validated successfully. Subject: {verified_claims.get('sub', 'unknown')}")
-            return verified_claims
+            for issuer in [self.issuer_v1, self.issuer_v2]:
+                try:
+                    claims = jwt.decode(
+                        token,
+                        signing_key.key,
+                        algorithms=["RS256"],
+                        audience=self.allowed_audiences,
+                        issuer=issuer,
+                        options={
+                            "verify_aud": True,
+                            "verify_iss": True,
+                            "verify_exp": True,
+                            "verify_nbf": True,
+                        }
+                    )
+                    logger.info(f"Token validated successfully with issuer: {issuer}")
+                    break
+                except InvalidIssuerError as e:
+                    last_error = str(e)
+                    continue
+                except (InvalidTokenError, ExpiredSignatureError, InvalidAudienceError) as e:
+                    last_error = str(e)
+                    logger.warning(f"Token validation failed with issuer {issuer}: {e}")
+                    break  # Don't try other issuers for non-issuer errors
             
-        except ImportError:
-            # PyJWT not installed - use basic validation only
-            logger.warning("PyJWT not installed - using basic token validation without signature verification")
-            logger.info(f"Token claims validated. Subject: {claims.get('sub', 'unknown')}")
-            return claims
+            if claims is None:
+                return False, None, f"Token validation failed: {last_error}"
             
-    except ValueError:
-        raise
-    except Exception as e:
-        logger.error(f"Token validation error: {e}")
-        raise ValueError(f"Token validation failed: {str(e)}")
+            # Log successful validation
+            logger.info(f"Token validated for app: {claims.get('appid') or claims.get('azp')}")
+            
+            return True, claims, None
+            
+        except Exception as e:
+            logger.error(f"Token validation error: {e}")
+            return False, None, str(e)
 
 
-def extract_bearer_token(request: Request) -> Optional[str]:
-    """
-    Extract the bearer token from the Authorization header.
-    """
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def get_token_from_request(request: Request) -> Optional[str]:
+    """Extract bearer token from request Authorization header."""
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[7:]
-    return None
+    
+    if not auth_header.startswith("Bearer "):
+        return None
+    
+    return auth_header[7:]  # Remove "Bearer " prefix
+
+
+def require_auth(validator: EntraTokenValidator):
+    """
+    Decorator factory that creates an authentication middleware.
+    
+    Usage:
+        @require_auth(validator)
+        async def my_endpoint(request):
+            ...
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(request: Request, *args, **kwargs):
+            token = get_token_from_request(request)
+            
+            if not token:
+                logger.warning("No bearer token in request")
+                return JSONResponse(
+                    {"error": "unauthorized", "message": "Missing bearer token"},
+                    status_code=401
+                )
+            
+            is_valid, claims, error = await validator.validate_token(token)
+            
+            if not is_valid:
+                logger.warning(f"Token validation failed: {error}")
+                return JSONResponse(
+                    {"error": "unauthorized", "message": error},
+                    status_code=401
+                )
+            
+            # Attach claims to request state for downstream use
+            request.state.token_claims = claims
+            
+            return await func(request, *args, **kwargs)
+        
+        return wrapper
+    return decorator
 
 
 # =============================================================================
-# Authentication Middleware
+# ASGI Middleware
 # =============================================================================
 
-class EntraAuthMiddleware(BaseHTTPMiddleware):
+class EntraAuthMiddleware:
     """
-    Middleware to validate Microsoft Entra ID bearer tokens on incoming requests.
+    ASGI middleware for Microsoft Entra ID authentication.
     
-    - Health endpoint (/health) is excluded for Container Apps probes
-    - All other endpoints require valid Entra ID token when auth is enabled
-    - Returns 401 Unauthorized for invalid or missing tokens
+    This middleware validates bearer tokens on all requests except
+    for specified excluded paths (like /health).
+    
+    Note: This is a raw ASGI middleware, not a Starlette BaseHTTPMiddleware,
+    which allows it to work correctly with FastMCP's lifespan management.
     """
     
-    async def dispatch(self, request: Request, call_next):
-        # Allow health checks without authentication
-        if request.url.path == "/health":
-            return await call_next(request)
+    def __init__(
+        self,
+        app,
+        validator: EntraTokenValidator,
+        excluded_paths: Optional[list] = None
+    ):
+        """
+        Initialize the auth middleware.
         
-        # Skip auth if disabled
-        if not ENTRA_AUTH_ENABLED:
-            logger.debug("Entra auth disabled - allowing request without token validation")
-            return await call_next(request)
+        Args:
+            app: The ASGI application to wrap
+            validator: EntraTokenValidator instance
+            excluded_paths: List of paths to exclude from auth (e.g., ["/health"])
+        """
+        self.app = app
+        self.validator = validator
+        self.excluded_paths = excluded_paths or ["/health"]
+    
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         
-        # Check for required configuration
-        if not ENTRA_TENANT_ID or not ENTRA_CLIENT_ID:
-            logger.error("Entra auth enabled but AZURE_TENANT_ID or AZURE_CLIENT_ID not configured")
-            return JSONResponse(
-                status_code=500,
-                content={"error": "Server authentication not configured properly"}
-            )
+        request = Request(scope, receive)
+        path = request.url.path
         
-        # Extract bearer token
-        token = extract_bearer_token(request)
-        if not token:
-            logger.warning(f"Missing bearer token for {request.url.path}")
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": "Unauthorized",
-                    "message": "Bearer token required. Use Microsoft Entra authentication with Project Managed Identity."
-                }
-            )
+        # Skip auth for excluded paths
+        if any(path.startswith(excluded) for excluded in self.excluded_paths):
+            await self.app(scope, receive, send)
+            return
         
         # Validate token
-        try:
-            claims = await validate_entra_token(token)
-            # Store claims in request state for potential use by handlers
-            request.state.token_claims = claims
-            request.state.authenticated = True
-        except ValueError as e:
-            logger.warning(f"Token validation failed: {e}")
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": "Unauthorized",
-                    "message": str(e)
-                }
-            )
-        except Exception as e:
-            logger.error(f"Unexpected error during token validation: {e}")
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": "Unauthorized",
-                    "message": "Token validation failed"
-                }
-            )
+        token = get_token_from_request(request)
         
-        return await call_next(request)
+        if not token:
+            logger.warning(f"No bearer token in request to {path}")
+            response = JSONResponse(
+                {"error": "unauthorized", "message": "Missing bearer token"},
+                status_code=401
+            )
+            await response(scope, receive, send)
+            return
+        
+        logger.info(f"Validating token for request to {path}")
+        is_valid, claims, error = await self.validator.validate_token(token)
+        
+        if not is_valid:
+            logger.warning(f"Token validation failed for {path}: {error}")
+            response = JSONResponse(
+                {"error": "unauthorized", "message": f"Authentication failed - check MCP server Entra ID configuration. Details: {error}"},
+                status_code=401
+            )
+            await response(scope, receive, send)
+            return
+        
+        logger.info(f"Token validated successfully for {path}")
+        # Store claims in scope for downstream use
+        scope["state"] = scope.get("state", {})
+        scope["state"]["token_claims"] = claims
+        
+        await self.app(scope, receive, send)
+
+
+# =============================================================================
+# Factory Function
+# =============================================================================
+
+def create_validator_from_env() -> Optional[EntraTokenValidator]:
+    """
+    Create an EntraTokenValidator from environment variables.
+    
+    Required environment variables:
+        ENTRA_TENANT_ID or AZURE_TENANT_ID: Microsoft Entra tenant ID
+        ENTRA_CLIENT_ID or AZURE_CLIENT_ID: Application (client) ID
+        
+    Optional:
+        ENTRA_ALLOWED_AUDIENCES: Comma-separated list of allowed audiences
+        DISABLE_ENTRA_AUTH: Set to "true" to disable authentication
+    
+    Returns:
+        EntraTokenValidator if auth is configured and enabled, None otherwise
+    """
+    # Check if auth is explicitly disabled
+    if not ENTRA_AUTH_ENABLED:
+        if _auth_explicitly_disabled:
+            logger.info("Entra auth explicitly disabled (DISABLE_ENTRA_AUTH=true)")
+        else:
+            logger.info("Entra auth not configured (missing credentials)")
+        return None
+    
+    tenant_id = ENTRA_TENANT_ID
+    client_id = ENTRA_CLIENT_ID
+    
+    allowed_audiences = None
+    audiences_env = os.getenv("ENTRA_ALLOWED_AUDIENCES")
+    if audiences_env:
+        allowed_audiences = [a.strip() for a in audiences_env.split(",")]
+    
+    logger.info(f"Entra auth configured for tenant: {tenant_id}, client: {client_id}")
+    
+    return EntraTokenValidator(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        allowed_audiences=allowed_audiences
+    )
 
 
 def configure_auth_middleware():
-    """Configure authentication middleware for the MCP server."""
+    """Log authentication middleware configuration status."""
     if ENTRA_AUTH_ENABLED:
         logger.info("Entra ID authentication enabled")
         logger.info(f"  Tenant ID: {ENTRA_TENANT_ID}")
         logger.info(f"  Client ID (Audience): {ENTRA_CLIENT_ID}")
-        logger.info(f"  Valid issuers: {ENTRA_ISSUER_V1}, {ENTRA_ISSUER_V2}")
     else:
-        logger.warning("Entra ID authentication DISABLED - MCP endpoints are public")
+        if _auth_explicitly_disabled:
+            logger.warning("Entra ID authentication DISABLED (DISABLE_ENTRA_AUTH=true)")
+        else:
+            logger.warning("Entra ID authentication DISABLED - MCP endpoints are public")
+

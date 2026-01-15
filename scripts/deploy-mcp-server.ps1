@@ -17,7 +17,7 @@
     The environment name for deployment (dev or prod). Default: "dev"
 
 .PARAMETER AzureEnvName
-    The Azure Developer CLI environment name. Default: "mcp-excel-{EnvironmentName}"
+    The Azure Developer CLI environment name (alias: -AzureEnvironment). Default: "mcp-excel-{EnvironmentName}"
 
 .PARAMETER Location
     The Azure region for deployment (default: "eastus2")
@@ -65,6 +65,7 @@
 param(
     [ValidateSet("dev", "prod")]
     [string]$EnvironmentName = "dev",
+    [Alias("AzureEnvironment")]
     [string]$AzureEnvName = "",
     [string]$Location = "eastus2",
     [string]$AzureClientId = "",
