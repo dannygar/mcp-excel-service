@@ -25,14 +25,14 @@ logger = logging.getLogger("mcp-excel-server")
 # Time windows: "9:30-11:00", "11:00-12:00", "1:00-2:00", "2:30-3:30"
 # Strike types: "C" (Call), "P" (Put)
 DELTA_COLUMN_MAPPING = {
-    ("9:30-11:00", "C"): "U",   # Sold Calls 9:30am-11:00am
-    ("9:30-11:00", "P"): "V",   # Sold Puts 9:30am-11:00am
-    ("11:00-12:00", "C"): "W",  # Sold Calls 11:00am-12:00pm
-    ("11:00-12:00", "P"): "X",  # Sold Puts 11:00am-12:00pm
-    ("1:00-2:00", "C"): "Y",    # Sold Calls 1:00pm-2:00pm
-    ("1:00-2:00", "P"): "Z",    # Sold Puts 1:00pm-2:00pm
-    ("2:30-3:30", "C"): "AA",   # Sold Calls 2:30pm-3:30pm
-    ("2:30-3:30", "P"): "AB",   # Sold Puts 2:30pm-3:30pm
+    ("9:30-11:00", "C"): "T",   # C Delta at 10am
+    ("9:30-11:00", "P"): "U",   # P Delta at 10am
+    ("11:00-12:00", "C"): "V",  # C Delta at 11:30am
+    ("11:00-12:00", "P"): "W",  # P Delta at 11:30am
+    ("1:00-2:00", "C"): "X",    # C Delta at 1:30pm
+    ("1:00-2:00", "P"): "Y",    # P Delta at 1:30pm
+    ("2:30-3:30", "C"): "Z",    # C Delta at 3:00pm
+    ("2:30-3:30", "P"): "AA",   # P Delta at 3:00pm
 }
 
 # Time window boundaries (in minutes from midnight)
@@ -132,8 +132,8 @@ async def update_trade_with_delta_impl(
         url: SharePoint/OneDrive URL to the document library
         file_name: Excel file name with .xlsx extension
         sheet_name: Worksheet name
-        trade_date: Date when the trade was opened (Column C)
-        trade_time: Time when the trade was opened (Column E)
+        trade_date: Date when the trade was opened (Column A)
+        trade_time: Time when the trade was opened (Column C)
         sold_strike: Sold strike with type prefix (e.g., "P 6855", "C 6960")
         delta: The delta value to record
         delta_time: Time when the delta was obtained (determines which column)
@@ -218,9 +218,9 @@ async def update_trade_with_delta_impl(
                 "message": f"Worksheet '{sheet_name}' is empty",
             }
         
-        # Step 2: Get columns C (date) and E (time) to find the matching row
+        # Step 2: Get columns A (date) and C (time) to find the matching row
         # Read both columns in one request for efficiency
-        search_range = f"C1:E{row_count}"
+        search_range = f"A1:C{row_count}"
         search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
         logger.info(f"Searching for trade with date='{trade_date}' and time='{trade_time}'")
         
@@ -242,12 +242,12 @@ async def update_trade_with_delta_impl(
         search_data = search_response.json()
         row_values = search_data.get("values", [])
         
-        # Step 3: Find the row with matching date (C) and time (E)
-        # Note: C is index 0, D is index 1, E is index 2
+        # Step 3: Find the row with matching date (A) and time (C)
+        # Note: A is index 0, B is index 1, C is index 2
         found_row = None
         for i, row in enumerate(row_values):
-            date_value = row[0] if len(row) > 0 else None  # Column C
-            time_value = row[2] if len(row) > 2 else None  # Column E
+            date_value = row[0] if len(row) > 0 else None  # Column A
+            time_value = row[2] if len(row) > 2 else None  # Column C
             
             # Compare date
             date_match = compare_values_for_search(date_value, trade_date)
@@ -350,10 +350,10 @@ async def close_trade_impl(
         url: SharePoint/OneDrive URL to the document library
         file_name: Excel file name with .xlsx extension
         sheet_name: Worksheet name
-        trade_date: Date when the trade was opened (Column C)
-        trade_time: Time when the trade was opened (Column E)
-        close_date: Date when the trade was closed (Column F)
-        close_time: Time when the trade was closed (Column G)
+        trade_date: Date when the trade was opened (Column A)
+        trade_time: Time when the trade was opened (Column C)
+        close_date: Date when the trade was closed (Column D)
+        close_time: Time when the trade was closed (Column E)
     
     Returns:
         Dictionary with operation result
@@ -402,9 +402,9 @@ async def close_trade_impl(
                 "message": f"Worksheet '{sheet_name}' is empty",
             }
         
-        # Step 2: Get columns C (date) and E (time) to find the matching row
+        # Step 2: Get columns A (date) and C (time) to find the matching row
         # Read both columns in one request for efficiency
-        search_range = f"C1:E{row_count}"
+        search_range = f"A1:C{row_count}"
         search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
         logger.info(f"Searching for trade with date='{trade_date}' and time='{trade_time}'")
         
@@ -426,12 +426,12 @@ async def close_trade_impl(
         search_data = search_response.json()
         row_values = search_data.get("values", [])
         
-        # Step 3: Find the row with matching date (C) and time (E)
-        # Note: C is index 0, D is index 1, E is index 2
+        # Step 3: Find the row with matching date (A) and time (C)
+        # Note: A is index 0, B is index 1, C is index 2
         found_row = None
         for i, row in enumerate(row_values):
-            date_value = row[0] if len(row) > 0 else None  # Column C
-            time_value = row[2] if len(row) > 2 else None  # Column E
+            date_value = row[0] if len(row) > 0 else None  # Column A
+            time_value = row[2] if len(row) > 2 else None  # Column C
             
             # Compare date
             date_match = compare_values_for_search(date_value, trade_date)
@@ -473,12 +473,12 @@ async def close_trade_impl(
                 "hint": "Ensure the trade_date and trade_time match exactly what's in the spreadsheet",
             }
         
-        # Step 4: Update the close date (Column F) and close time (Column G)
+        # Step 4: Update the close date (Column D) and close time (Column E)
         updated_cells = []
         errors = []
         
-        # Update close date (Column F)
-        close_date_address = f"F{found_row}"
+        # Update close date (Column D)
+        close_date_address = f"D{found_row}"
         close_date_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{close_date_address}')"
         
         logger.info(f"Updating cell '{close_date_address}' with close_date '{close_date}'")
@@ -497,8 +497,8 @@ async def close_trade_impl(
             error_message = error_data.get("error", {}).get("message", close_date_response.text)
             errors.append({"cell": close_date_address, "error": error_message})
         
-        # Update close time (Column G)
-        close_time_address = f"G{found_row}"
+        # Update close time (Column E)
+        close_time_address = f"E{found_row}"
         close_time_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{close_time_address}')"
         
         logger.info(f"Updating cell '{close_time_address}' with close_time '{close_time}'")
@@ -633,20 +633,32 @@ async def log_trades_impl(
     Returns:
         Dictionary with operation result
     """
-    # Column configuration for trade tracker
+    # Column configuration for trade tracker (matches CSV columns A–AC)
+    # Formula columns B, F, K, N, R are intentionally excluded
     COLUMN_MAP = {
-        "C": "open_date",
-        "E": "open_time",
-        "I": "strategy",
-        "J": "credit",
-        "K": "debit",
-        "L": "contracts",
-        "N": "open_fees",
-        "O": "close_fees",
-        "Q": "sold_call_strike",
-        "R": "sold_put_strike",
-        "T": "width",
+        "A": "open_date",         # Date of Purchase
+        "C": "open_time",         # Time IN
+        "G": "strategy",          # Strategy (after map_strategy_name())
+        "H": "credit",            # Credit (per-contract)
+        "I": "debit",             # Debit (per-contract)
+        "J": "contracts",         # Contracts
+        "L": "open_fees",         # Open Fees
+        "M": "close_fees",        # Close Fees
+        "O": "ATR",               # ATR
+        "P": "sold_call_strike",  # Short Calls
+        "Q": "sold_put_strike",   # Short Puts
+        "S": "width",             # Width
     }
+
+    # Grouped ranges for efficient batch writes (6 PATCH calls instead of 12)
+    COLUMN_GROUPS = [
+        ("A", ["open_date"]),                              # A only
+        ("C", ["open_time"]),                              # C only
+        ("G", ["strategy", "credit", "debit", "contracts"]),  # G:J
+        ("L", ["open_fees", "close_fees"]),                # L:M
+        ("O", ["ATR", "sold_call_strike", "sold_put_strike"]),  # O:Q
+        ("S", ["width"]),                                  # S only
+    ]
     
     logger.info(f"excel.logTrades called with sheet_name='{sheet_name}'")
     
@@ -729,8 +741,8 @@ async def log_trades_impl(
                 "message": f"Worksheet '{sheet_name}' is empty",
             }
         
-        # Get column C values
-        search_range = f"C1:C{row_count}"
+        # Get column A values
+        search_range = f"A1:A{row_count}"
         search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
         search_response = await client.get(search_url, headers=headers, timeout=30.0)
         
@@ -739,7 +751,7 @@ async def log_trades_impl(
             error_message = error_data.get("error", {}).get("message", search_response.text)
             return {
                 "status": "error",
-                "message": f"Failed to read column C: {error_message}",
+                "message": f"Failed to read column A: {error_message}",
             }
         
         search_data = search_response.json()
@@ -768,7 +780,7 @@ async def log_trades_impl(
         
         # Fallback: look for "Date of Purchase" header
         if last_date_row is None:
-            logger.info("No valid dates found in column C, searching for 'Date of Purchase' header...")
+            logger.info("No valid dates found in column A, searching for 'Date of Purchase' header...")
             for i, row_value in enumerate(column_values):
                 cell_value = row_value[0] if row_value else None
                 if cell_value is not None and isinstance(cell_value, str):
@@ -780,7 +792,7 @@ async def log_trades_impl(
         if last_date_row is None:
             return {
                 "status": "error",
-                "message": f"Could not find any valid date or 'Date of Purchase' header in column C of sheet '{sheet_name}'",
+                "message": f"Could not find any valid date or 'Date of Purchase' header in column A of sheet '{sheet_name}'",
             }
     
     logger.info(f"Logging {len(trades)} trades to {file_name}, sheet '{sheet_name}'")
@@ -858,6 +870,9 @@ async def log_trades_impl(
             if sold is not None and bought is not None:
                 width = abs(bought - sold)
         
+        # ATR: direct float value from trade input
+        atr_value = trade.get("ATR") or trade.get("atr") or ""
+
         values_dict = {
             "open_date": open_date,
             "open_time": open_time,
@@ -867,6 +882,7 @@ async def log_trades_impl(
             "contracts": trade.get("contracts", ""),
             "open_fees": open_fees,
             "close_fees": trade.get("close_fees", ""),
+            "ATR": atr_value if atr_value else "",
             "sold_call_strike": sold_call_strike if sold_call_strike else "",
             "sold_put_strike": sold_put_strike if sold_put_strike else "",
             "width": width if width else "",
@@ -875,7 +891,7 @@ async def log_trades_impl(
         # Log the extracted values for debugging
         logger.info(f"Trade {i+1} extracted values: open_date={open_date}, open_time={open_time}, "
                     f"strategy={mapped_strategy}, credit={credit}, contracts={trade.get('contracts')}, "
-                    f"open_fees={open_fees}, sold_call={sold_call_strike}, sold_put={sold_put_strike}, width={width}")
+                    f"open_fees={open_fees}, atr={atr_value}, sold_call={sold_call_strike}, sold_put={sold_put_strike}, width={width}")
         
         target_row = last_date_row + 1 + i
         
@@ -885,30 +901,40 @@ async def log_trades_impl(
         cell_errors = []
         
         async with httpx.AsyncClient() as write_client:
-            for col_letter, field_name in COLUMN_MAP.items():
-                value = values_dict.get(field_name, "")
-                if value == "" or value is None:
+            for start_col, fields in COLUMN_GROUPS:
+                values = [values_dict.get(f, "") for f in fields]
+                
+                # Skip group if all values are empty/None
+                if all(v == "" or v is None for v in values):
                     continue
                 
-                cell_address = f"{col_letter}{target_row}"
-                cell_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{cell_address}')"
+                # Replace None with empty string for partial groups
+                values = ["" if v is None else v for v in values]
+                
+                if len(fields) == 1:
+                    address = f"{start_col}{target_row}"
+                else:
+                    end_col = chr(ord(start_col) + len(fields) - 1)
+                    address = f"{start_col}{target_row}:{end_col}{target_row}"
+                
+                range_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{address}')"
                 
                 try:
                     response = await write_client.patch(
-                        cell_url,
+                        range_url,
                         headers=headers,
-                        json={"values": [[value]]},
+                        json={"values": [values]},
                         timeout=30.0
                     )
                     
                     if response.status_code in [200, 201]:
-                        updated_cells.append(cell_address)
+                        updated_cells.append(address)
                     else:
                         error_data = response.json() if response.content else {}
                         error_message = error_data.get("error", {}).get("message", response.text)
-                        cell_errors.append(f"{cell_address}: {error_message}")
+                        cell_errors.append(f"{address}: {error_message}")
                 except Exception as cell_error:
-                    cell_errors.append(f"{col_letter}{target_row}: {str(cell_error)}")
+                    cell_errors.append(f"{address}: {str(cell_error)}")
         
         if cell_errors:
             errors.append({

@@ -125,7 +125,7 @@ async def excel_update_trade_with_delta(
     """
     Update delta value for a trade in an Excel workbook.
     
-    This tool finds a trade row by matching the trade date (Column C) and trade time (Column E),
+    This tool finds a trade row by matching the trade date (Column A) and trade time (Column C),
     then updates the appropriate delta column based on the delta time and strike type.
     
     Args:
@@ -149,16 +149,16 @@ async def excel_update_trade_with_delta(
         JSON string with operation result
     
     Column Mapping:
-        - Column C: Date when the trade was opened (search column)
-        - Column E: Time when the trade was opened (search column)
-        - Column U: Delta for Sold Calls (9:30 AM - 11:00 AM)
-        - Column V: Delta for Sold Puts (9:30 AM - 11:00 AM)
-        - Column W: Delta for Sold Calls (11:00 AM - 12:00 PM)
-        - Column X: Delta for Sold Puts (11:00 AM - 12:00 PM)
-        - Column Y: Delta for Sold Calls (1:00 PM - 2:00 PM)
-        - Column Z: Delta for Sold Puts (1:00 PM - 2:00 PM)
-        - Column AA: Delta for Sold Calls (2:30 PM - 3:30 PM)
-        - Column AB: Delta for Sold Puts (2:30 PM - 3:30 PM)
+        - Column A: Date when the trade was opened (search column)
+        - Column C: Time when the trade was opened (search column)
+        - Column T: Delta for Sold Calls (9:30 AM - 11:00 AM)
+        - Column U: Delta for Sold Puts (9:30 AM - 11:00 AM)
+        - Column V: Delta for Sold Calls (11:00 AM - 12:00 PM)
+        - Column W: Delta for Sold Puts (11:00 AM - 12:00 PM)
+        - Column X: Delta for Sold Calls (1:00 PM - 2:00 PM)
+        - Column Y: Delta for Sold Puts (1:00 PM - 2:00 PM)
+        - Column Z: Delta for Sold Calls (2:30 PM - 3:30 PM)
+        - Column AA: Delta for Sold Puts (2:30 PM - 3:30 PM)
     
     Example:
         excel_update_trade_with_delta(
@@ -171,7 +171,7 @@ async def excel_update_trade_with_delta(
             delta=0.12,
             delta_time="10:45 AM"
         )
-        # This would update Column V (Sold Put delta for 9:30-11:00 window)
+        # This would update Column U (Sold Put delta for 9:30-11:00 window)
     """
     try:
         # Call the core implementation
@@ -215,8 +215,8 @@ async def excel_close_trade(
     """
     Close a trade by updating the close date and close time in an Excel workbook.
     
-    This tool finds a trade row by matching the trade date (Column C) and trade time (Column E),
-    then updates the close date (Column F) and close time (Column G) with the provided values.
+    This tool finds a trade row by matching the trade date (Column A) and trade time (Column C),
+    then updates the close date (Column D) and close time (Column E) with the provided values.
     
     Args:
         url: SharePoint/OneDrive URL to the document library (e.g., https://contoso.sharepoint.com/Shared%20Documents)
@@ -231,10 +231,10 @@ async def excel_close_trade(
         JSON string with operation result
     
     Column Mapping:
-        - Column C: Date when the trade was opened (search column)
-        - Column E: Time when the trade was opened (search column)
-        - Column F: Date when the trade was closed (update column)
-        - Column G: Time when the trade was closed (update column)
+        - Column A: Date when the trade was opened (search column)
+        - Column C: Time when the trade was opened (search column)
+        - Column D: Date when the trade was closed (update column)
+        - Column E: Time when the trade was closed (update column)
     
     Example:
         excel_close_trade(
@@ -246,7 +246,7 @@ async def excel_close_trade(
             close_date="1/6/2026",
             close_time="4:00 PM"
         )
-        # This would update Column F with "1/6/2026" and Column G with "4:00 PM"
+        # This would update Column D with "1/6/2026" and Column E with "4:00 PM"
     """
     try:
         # Call the core implementation
@@ -389,7 +389,7 @@ async def excel_log_trades(
     """
     Log multiple trades to an Excel workbook.
     
-    This tool automatically finds the last row with a valid date in column C and
+    This tool automatically finds the last row with a valid date in column A and
     appends trade data starting from the next row.
     
     Note: This tool does NOT set close_date or close_time. Use the excel.closeTrade 
@@ -420,46 +420,24 @@ async def excel_log_trades(
         JSON string with operation result including count of trades logged.
     
     Column Mapping:
-        - Column C: Date when the trade was opened
-        - Column E: Time when the trade was opened
-        - Column I: Strategy
-        - Column J: Credit Received
-        - Column K: Debit Paid (only when trade is closed before expiration)
-        - Column L: Number of Contracts
-        - Column N: Total fees paid when the trade was opened
-        - Column O: Total fees paid if the trade was closed before expiration
-        - Column Q: Strike price for Sold Calls
-        - Column R: Strike price for Sold Puts
-        - Column T: Width in USD between sold and bought strikes
+        - Column A: Date when the trade was opened
+        - Column C: Time when the trade was opened
+        - Column G: Strategy
+        - Column H: Credit Received
+        - Column I: Debit Paid (only when trade is closed before expiration)
+        - Column J: Number of Contracts
+        - Column L: Total fees paid when the trade was opened
+        - Column M: Total fees paid if the trade was closed before expiration
+        - Column O: ATR (Average True Range)
+        - Column P: Strike price for Sold Calls
+        - Column Q: Strike price for Sold Puts
+        - Column S: Width in USD between sold and bought strikes
    
     """
-    # Column configuration for trade tracker
-    # C=open_date, E=open_time, I=strategy, J=credit, K=debit, L=contracts, 
-    # N=open_fees, O=close_fees, Q=sold_call, R=sold_put, T=width
-    # Note: Close date/time (F, G) are NOT set here - use excel.closeTrade tool instead
-    COLUMN_MAP = {
-        "C": "open_date",
-        "E": "open_time",
-        "I": "strategy",
-        "J": "credit",
-        "K": "debit",
-        "L": "contracts",
-        "N": "open_fees",
-        "O": "close_fees",
-        "Q": "sold_call_strike",
-        "R": "sold_put_strike",
-        "T": "width",
-    }
-    
-    # Log incoming parameters for debugging
-    logger.info(f"excel.logTrades called with sheet_name='{sheet_name}'")
-    logger.info(f"Raw trades input (first 500 chars): {trades[:500] if len(trades) > 500 else trades}")
-    
     try:
-        # Parse the trades JSON
+        # Parse the trades JSON string into a list
         try:
             trades_list = json.loads(trades)
-            logger.info(f"Parsed {len(trades_list)} trades from JSON")
             if not isinstance(trades_list, list):
                 return json.dumps({
                     "status": "error",
@@ -470,342 +448,23 @@ async def excel_log_trades(
                 "status": "error",
                 "message": f"Invalid JSON in trades: {str(e)}",
             }, indent=2)
-        
+
         if len(trades_list) == 0:
             return json.dumps({
                 "status": "warning",
                 "message": "No trades provided to log",
             }, indent=2)
-        
-        # Sort trades by open_date (ascending) then by open_time (ascending)
-        def parse_trade_datetime(trade: dict) -> tuple:
-            """
-            Parse trade's open_date and open_time for sorting.
-            Returns a tuple (date_key, time_key) for proper chronological ordering.
-            """
-            # Handle alternative field names from different clients
-            open_date_str = trade.get("open_date") or trade.get("date") or trade.get("executed_date") or ""
-            open_time_str = trade.get("open_time") or trade.get("time") or trade.get("executed_time") or ""
-            
-            # Parse date - default to max date if invalid
-            date_key = datetime.max
-            if open_date_str:
-                parsed_date = parse_date_string(open_date_str)
-                if parsed_date:
-                    date_key = parsed_date
-            
-            # Parse time - default to max time if invalid
-            time_key = datetime.max.time()
-            if open_time_str:
-                # Try common time formats
-                time_formats = [
-                    "%I:%M %p",      # 10:30 AM
-                    "%I:%M%p",       # 10:30AM
-                    "%H:%M",         # 14:30
-                    "%H:%M:%S",      # 14:30:00
-                    "%I:%M:%S %p",   # 10:30:00 AM
-                ]
-                for fmt in time_formats:
-                    try:
-                        parsed_time = datetime.strptime(open_time_str.strip().upper(), fmt)
-                        time_key = parsed_time.time()
-                        break
-                    except ValueError:
-                        continue
-            
-            return (date_key, time_key)
-        
-        # Sort trades chronologically (earliest first)
-        trades_list.sort(key=parse_trade_datetime)
-        logger.info(f"Sorted {len(trades_list)} trades by open_date and open_time (ascending)")
-        
-        # Find the last non-empty date in column C to determine where to insert new rows
-        logger.info(f"Finding last date in column C of sheet '{sheet_name}'")
-        
-        # Resolve URL to get drive_id, item_id, and site_id
-        resolved = await resolve_excel_file_ids(url, file_name)
-        if resolved.get("status") != "success":
-            return json.dumps({
-                "status": "error",
-                "message": f"Failed to resolve Excel file: {resolved.get('message')}",
-            }, indent=2)
-        
-        drive_id = resolved["drive_id"]
-        item_id = resolved["item_id"]
-        site_id = resolved.get("site_id")
-        workbook_url = build_workbook_url(drive_id, item_id, site_id)
-        headers = await get_graph_headers()
-        
-        async with httpx.AsyncClient() as client:
-            # Get used range to find data extent
-            used_range_url = f"{workbook_url}/worksheets/{sheet_name}/usedRange"
-            used_range_response = await client.get(used_range_url, headers=headers, timeout=30.0)
-            
-            if used_range_response.status_code != 200:
-                error_data = used_range_response.json() if used_range_response.content else {}
-                error_message = error_data.get("error", {}).get("message", used_range_response.text)
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Failed to get worksheet data: {error_message}",
-                }, indent=2)
-            
-            used_range_data = used_range_response.json()
-            row_count = used_range_data.get("rowCount", 0)
-            
-            if row_count == 0:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Worksheet '{sheet_name}' is empty",
-                }, indent=2)
-            
-            # Get column C values
-            search_range = f"C1:C{row_count}"
-            search_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{search_range}')"
-            search_response = await client.get(search_url, headers=headers, timeout=30.0)
-            
-            if search_response.status_code != 200:
-                error_data = search_response.json() if search_response.content else {}
-                error_message = error_data.get("error", {}).get("message", search_response.text)
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Failed to read column C: {error_message}",
-                }, indent=2)
-            
-            search_data = search_response.json()
-            column_values = search_data.get("values", [])
-            
-            # Find the last non-empty cell with a valid date value (searching from bottom)
-            last_date_row = None
-            
-            for i in range(len(column_values) - 1, -1, -1):
-                cell_value = column_values[i][0] if column_values[i] else None
-                if cell_value is not None and cell_value != "":
-                    # Check if it's a valid date (either Excel serial number or date string)
-                    try:
-                        # If it's a number (Excel serial date), convert to date string
-                        if isinstance(cell_value, (int, float)) and 1 <= cell_value <= 2958465:
-                            dt = excel_serial_to_date(cell_value)
-                            last_date_display = dt.strftime("%m/%d/%Y")
-                            last_date_row = i + 1
-                            logger.info(f"Found last date at row {last_date_row}: Excel serial {cell_value} → {last_date_display}")
-                            break
-                        # If it's a string, try to parse it as a date
-                        elif isinstance(cell_value, str):
-                            parsed = parse_date_string(cell_value)
-                            if parsed:
-                                last_date_row = i + 1
-                                logger.info(f"Found last date at row {last_date_row}: {cell_value}")
-                                break
-                    except (ValueError, TypeError):
-                        continue
-            
-            # Fallback: If no valid date found, look for "Date of Purchase" header cell
-            if last_date_row is None:
-                logger.info("No valid dates found in column C, searching for 'Date of Purchase' header...")
-                for i, row_value in enumerate(column_values):
-                    cell_value = row_value[0] if row_value else None
-                    if cell_value is not None and isinstance(cell_value, str):
-                        # Check for "Date of Purchase" (case-insensitive, partial match)
-                        if "date" in cell_value.lower() and "purchase" in cell_value.lower():
-                            last_date_row = i + 1  # Use the header row as the reference
-                            logger.info(f"Found 'Date of Purchase' header at row {last_date_row}, will start writing at row {last_date_row + 1}")
-                            break
-            
-            if last_date_row is None:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Could not find any valid date or 'Date of Purchase' header in column C of sheet '{sheet_name}'",
-                }, indent=2)
-        
-        logger.info(f"Logging {len(trades_list)} trades to {file_name}, sheet '{sheet_name}'")
-        logger.info(f"Last date row: {last_date_row}, will start writing at row {last_date_row + 1}")
-        
-        results = []
-        errors = []
-        
-        for i, trade in enumerate(trades_list):
-            # Log the raw trade object for debugging
-            logger.info(f"Processing trade {i+1}: {json.dumps(trade)}")
-            
-            # Extract trade fields with defaults
-            # Map strategy name to Excel short code
-            raw_strategy = trade.get("strategy", "")
-            mapped_strategy = map_strategy_name(raw_strategy)
-            if raw_strategy != mapped_strategy:
-                logger.info(f"Mapped strategy '{raw_strategy}' → '{mapped_strategy}'")
-            
-            # Handle alternative field names from different clients
-            # open_date: can be "open_date", "date", or "executed_date"
-            open_date = trade.get("open_date") or trade.get("date") or trade.get("executed_date") or ""
-            
-            # open_time: can be "open_time", "time", or "executed_time"
-            open_time = trade.get("open_time") or trade.get("time") or trade.get("executed_time") or ""
-            
-            # credit: can be "credit" or "credit_received" (convert to per-contract if needed)
-            credit = trade.get("credit")
-            if credit is None or credit == "":
-                credit_received = trade.get("credit_received")
-                contracts = trade.get("contracts", 1)
-                if credit_received and contracts:
-                    # credit_received is total, convert to per-contract (divided by 100 for options)
-                    credit = credit_received / (contracts * 100) if contracts > 0 else ""
-                else:
-                    credit = ""
-            
-            # debit: can be "debit" or "debit_paid" (convert to per-contract if needed)
-            debit = trade.get("debit")
-            if debit is None or debit == "":
-                debit_paid = trade.get("debit_paid")
-                contracts = trade.get("contracts", 1)
-                if debit_paid and contracts:
-                    debit = debit_paid / (contracts * 100) if contracts > 0 else ""
-                else:
-                    debit = ""
-            
-            # open_fees: can be "open_fees", "fees", or "total_fees"
-            open_fees = trade.get("open_fees") or trade.get("fees") or trade.get("total_fees") or ""
-            
-            # sold_call_strike: can be "sold_call_strike" or extracted from "sold_strikes" array for calls
-            sold_call_strike = trade.get("sold_call_strike")
-            if (sold_call_strike is None or sold_call_strike == "") and trade.get("sold_strikes"):
-                # Check if this is a call spread (strategy contains "Call" or only calls_contracts > 0)
-                is_call_spread = (
-                    "call" in raw_strategy.lower() or 
-                    (trade.get("calls_contracts", 0) > 0 and trade.get("puts_contracts", 0) == 0)
-                )
-                if is_call_spread and trade.get("sold_strikes"):
-                    sold_call_strike = trade["sold_strikes"][0] if trade["sold_strikes"] else ""
-            
-            # sold_put_strike: can be "sold_put_strike" or extracted from "sold_strikes" array for puts
-            sold_put_strike = trade.get("sold_put_strike")
-            if (sold_put_strike is None or sold_put_strike == "") and trade.get("sold_strikes"):
-                # Check if this is a put spread (strategy contains "Put" or only puts_contracts > 0)
-                is_put_spread = (
-                    "put" in raw_strategy.lower() or 
-                    (trade.get("puts_contracts", 0) > 0 and trade.get("calls_contracts", 0) == 0)
-                )
-                if is_put_spread and trade.get("sold_strikes"):
-                    sold_put_strike = trade["sold_strikes"][0] if trade["sold_strikes"] else ""
-            
-            # width: can be "width" or calculated from sold_strikes and bought_strikes
-            width = trade.get("width")
-            if (width is None or width == "") and trade.get("sold_strikes") and trade.get("bought_strikes"):
-                sold = trade["sold_strikes"][0] if trade["sold_strikes"] else None
-                bought = trade["bought_strikes"][0] if trade["bought_strikes"] else None
-                if sold is not None and bought is not None:
-                    width = abs(bought - sold)
-            
-            # Build values dictionary matching COLUMN_MAP
-            # Note: close_date/close_time are NOT set here - use excel.closeTrade tool
-            values_dict = {
-                "open_date": open_date,
-                "open_time": open_time,
-                "strategy": mapped_strategy,
-                "credit": credit,
-                "debit": debit,
-                "contracts": trade.get("contracts", ""),
-                "open_fees": open_fees,
-                "close_fees": trade.get("close_fees", ""),
-                "sold_call_strike": sold_call_strike if sold_call_strike else "",
-                "sold_put_strike": sold_put_strike if sold_put_strike else "",
-                "width": width if width else "",
-            }
-            
-            # Log the extracted values for debugging
-            logger.info(f"Trade {i+1} extracted values: open_date={open_date}, open_time={open_time}, "
-                        f"strategy={mapped_strategy}, credit={credit}, contracts={trade.get('contracts')}, "
-                        f"open_fees={open_fees}, sold_call={sold_call_strike}, sold_put={sold_put_strike}, width={width}")
-            
-            # Calculate target row: first trade goes to last_date_row + 1, second to last_date_row + 2, etc.
-            target_row = last_date_row + 1 + i
-            
-            logger.info(f"Logging trade {i+1}/{len(trades_list)}: strategy={mapped_strategy}, credit={trade.get('credit')}, contracts={trade.get('contracts')} to row {target_row}")
-            
-            # Write each cell directly to the calculated row
-            updated_cells = []
-            cell_errors = []
-            
-            async with httpx.AsyncClient() as write_client:
-                for col_letter, field_name in COLUMN_MAP.items():
-                    value = values_dict.get(field_name, "")
-                    # Skip empty values
-                    if value == "" or value is None:
-                        continue
-                    
-                    cell_address = f"{col_letter}{target_row}"
-                    cell_url = f"{workbook_url}/worksheets/{sheet_name}/range(address='{cell_address}')"
-                    
-                    try:
-                        response = await write_client.patch(
-                            cell_url,
-                            headers=headers,
-                            json={"values": [[value]]},
-                            timeout=30.0
-                        )
-                        
-                        if response.status_code in [200, 201]:
-                            updated_cells.append(cell_address)
-                        else:
-                            error_data = response.json() if response.content else {}
-                            error_message = error_data.get("error", {}).get("message", response.text)
-                            cell_errors.append(f"{cell_address}: {error_message}")
-                    except Exception as cell_error:
-                        cell_errors.append(f"{col_letter}{target_row}: {str(cell_error)}")
-            
-            if cell_errors:
-                errors.append({
-                    "trade_index": i + 1,
-                    "error": f"Failed to update some cells: {', '.join(cell_errors)}",
-                    "strategy": mapped_strategy,
-                    "updated_cells": updated_cells,
-                })
-            else:
-                results.append({
-                    "trade_index": i + 1,
-                    "row": target_row,
-                    "open_date": open_date,
-                    "open_time": open_time,
-                    "strategy": mapped_strategy,
-                    "credit": trade.get("credit", ""),
-                    "debit": debit,
-                    "contracts": trade.get("contracts", ""),
-                    "open_fees": trade.get("open_fees", trade.get("fees", "")),
-                    "close_fees": trade.get("close_fees", ""),
-                    "sold_call_strike": trade.get("sold_call_strike", ""),
-                    "sold_put_strike": trade.get("sold_put_strike", ""),
-                    "width": trade.get("width", ""),
-                })
-        
-        # Build response
-        if errors and not results:
-            return json.dumps({
-                "status": "error",
-                "message": f"All {len(trades_list)} trades failed to log",
-                "errors": errors,
-            }, indent=2)
-        elif errors:
-            return json.dumps({
-                "status": "partial_success",
-                "message": f"Logged {len(results)} of {len(trades_list)} trades",
-                "trades_logged": len(results),
-                "trades_failed": len(errors),
-                "file_name": file_name,
-                "sheet_name": sheet_name,
-                "start_row": last_date_row + 1,
-                "results": results,
-                "errors": errors,
-            }, indent=2)
-        else:
-            return json.dumps({
-                "status": "success",
-                "message": f"Successfully logged {len(results)} trades",
-                "trades_logged": len(results),
-                "file_name": file_name,
-                "sheet_name": sheet_name,
-                "start_row": last_date_row + 1,
-                "results": results,
-            }, indent=2)
-            
+
+        # Delegate to core implementation
+        result = await log_trades_impl(
+            url=url,
+            file_name=file_name,
+            sheet_name=sheet_name,
+            trades=trades_list
+        )
+
+        return json.dumps(result, indent=2)
+
     except Exception as e:
         logger.error(f"Error logging trades: {e}")
         return json.dumps({
